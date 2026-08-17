@@ -1,13 +1,13 @@
 import type { Context } from 'cordis'
-import type { LocalGitM0Status } from '../core/manifest.js'
+import type { RuntimeStatus } from '../core/manifest.js'
 import { LOCAL_GIT_4_LLM_ID } from '../core/manifest.js'
 
 /**
- * Own the M0 host effect so injector reload/unload always disposes it cleanly.
- * No timers, file writes, tools, prompts, or cross-session delivery occur at
- * this milestone.
+ * Own the host effect so injector reload/unload always disposes it cleanly.
+ * M1a registers read-only tools only: it never auto-initializes repositories,
+ * reads conversations, or delivers cross-session messages.
  */
-export function installM0Lifecycle(ctx: Context, status: LocalGitM0Status): void {
+export function installLifecycle(ctx: Context, status: RuntimeStatus): void {
   ctx.effect(() => {
     ctx.logger?.info?.(
       `[${LOCAL_GIT_4_LLM_ID}] ${status.phase} host ready ` +
@@ -17,5 +17,5 @@ export function installM0Lifecycle(ctx: Context, status: LocalGitM0Status): void
     return () => {
       ctx.logger?.info?.(`[${LOCAL_GIT_4_LLM_ID}] ${status.phase} host disposed`)
     }
-  }, 'local-git-4-llm:m0-host-lifecycle')
+  }, 'local-git-4-llm:m1a-host-lifecycle')
 }

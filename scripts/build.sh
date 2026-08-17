@@ -50,6 +50,10 @@ for (const [name, relative] of [
   ['@deepseek-ai/dsh-client-runtime', '@deepseek-ai/dsh-client-runtime'],
   ['@deepseek-ai/dsh-client-ui-slots', '@deepseek-ai/dsh-client-ui-slots'],
   ['@deepseek-ai/dsh-client-ui-layout', '@deepseek-ai/dsh-client-ui-layout'],
+  ['@deepseek-ai/dsh-client-ui-primitives', '@deepseek-ai/dsh-client-ui-primitives'],
+  ['@deepseek-ai/dsh-session', '@deepseek-ai/dsh-session'],
+  ['@deepseek-ai/dsh-tools', '@deepseek-ai/dsh-tools'],
+  ['@deepseek-ai/dsh-workspace', '@deepseek-ai/dsh-workspace'],
 ]) {
   const target = path.join(runtime, relative)
   const link = path.resolve('node_modules', name)

@@ -1,17 +1,21 @@
 /**
  * Host entry for local-git-4-llm.
  *
- * M0 deliberately contributes only an owned lifecycle. The append-only
- * journal, tools, relay and workspace storage start in later milestones;
- * keeping this package side-effect free beyond lifecycle logging makes the
- * first injection safe to validate and trivial to unload.
+ * M1a adds a checksum-validated, read-only repository reader. It never
+ * initializes a repository automatically, reads conversation content, or
+ * delivers cross-session messages; all writes remain deferred to M1b.
  */
 import type { Context } from 'cordis'
-import { createLocalGitM0Status } from './core/manifest.js'
-import { installM0Lifecycle } from './relay/lifecycle.js'
+import type {} from '@deepseek-ai/dsh-tools'
+import type {} from '@deepseek-ai/dsh-workspace'
+import { createRuntimeStatus } from './core/manifest.js'
+import { installLifecycle } from './relay/lifecycle.js'
+import { installReadOnlyTools } from './tools/read-only.js'
 
 export const name = '@dsh-external/local-git-4-llm'
+export const inject = ['tools', 'workspaceRegistry'] as const
 
 export function apply(ctx: Context): void {
-  installM0Lifecycle(ctx, createLocalGitM0Status())
+  installLifecycle(ctx, createRuntimeStatus())
+  installReadOnlyTools(ctx)
 }

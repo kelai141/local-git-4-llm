@@ -3,7 +3,7 @@
 ## 方案设计与汇报文档（v1）
 
 > 用途：本文件既是对需求的完整应答（方案），也是本阶段工作汇报（汇报）。
-> 状态：`M0 IMPLEMENTED` — 方案已确认，hybrid 包已构建、注入并完成 host/client 装配验证；下一步为 M1a 纯引擎实现。
+> 状态：`M1a IMPLEMENTED` — hybrid 包已构建、注入并完成 host/client 装配验证；M1a 的主题自适应 Harness 鲸鱼入口、只读 journal 重放引擎和首批 `repo_*` 工具均已验证。下一步为 M1b 的显式写入与采纳流程。
 
 ---
 
@@ -24,10 +24,10 @@
 - 每工作区独立管理器 → 数据存工作区内 `.dsh-repo/`，控制面注册表在 `~/.dsh/managers/<workspaceId>/`；**`workspaceId` 为唯一权威键**（解析优先级见 §4.9 pt5）
 - **同步链路（§4.3）** → `/repo init` 命令建库 → 扫描到库自动注入工具（agent scope）与信息（prompt 桥每 step 求值）→ LLM 自主查询 → 变更经 `agent.send` **插话在线对话** / **预注入离线会话**（inbox 持久化，开始即同步）
 - 跨会话引用 → Issue 携带 `sessionId + messageId`，可经 `sessionQuery` 回溯原文
-- **现有工作区适配** → 按需采纳（`adopt.auto` 默认 false，建仓仅由显式 `/repo init`、`repo_adopt` 或首个 `repo_*` 调用触发）；prompt 桥对**任意**会话下一 step 注入提示（已纳仓=仓库认知，未纳仓=一行可 adopt 提示，`adopt.promptHint` 默认 true）；不可写目录（如 System32）降级到 `~/.dsh/managers/<workspaceId>` 外部存储；数据定位用 workspaceId 而非 path 哈希（§4.9）
+- **现有工作区适配** → 按需采纳（`adopt.auto` 默认 false，建仓仅由显式 `/repo init` 或 `repo_adopt` 触发；M1a 的只读 `repo_*` 调用绝不建仓）；prompt 桥对**任意**会话下一 step 注入提示（已纳仓=仓库认知，未纳仓=一行可 adopt 提示，`adopt.promptHint` 默认 true）；不可写目录（如 System32）降级到 `~/.dsh/managers/<workspaceId>` 外部存储；数据定位用 workspaceId 而非 path 哈希（§4.9）
 - 美术风格 → 全部用官方主题 token `--dsw-alias-*`（`bg-layer-1/label-primary/brand-primary/state-error-primary` 等，light/dark 自适应）
 
-**里程碑预算：** M0 单 hybrid 骨架接入注入器（1 天内）→ M1a 纯引擎 + 只读工具（1-2 天）→ M1b 写工具 + 现有工作区适配（1-2 天）→ M2 relay 同步（1 天）→ M3 UI 看板（1-2 天）→ M4 加固/演练/文档（1 天）。每阶段都有可验证的轨迹验收点（见 §9）。
+**里程碑进度：** M0 hybrid 骨架接入注入器（完成）→ M1a 纯引擎 + 只读工具（完成）→ M1b 写工具 + 现有工作区适配（下一步）→ M2 relay 同步 → M3 UI 看板 → M4 加固/演练/文档。每阶段都有可验证的轨迹验收点（见 §9）。
 
 **首要设计决策：** 知识仓库 = **追加式事件溯源日志**（journal）+ **不可变 commit 链**；回滚 = **生成 revert commit**，永不删历史；自动备份 = **提交后 + 定时 + 回滚前**三时机，写后读回校验 hash。这保证「出问题可追溯」不是口号而是数据结构。
 
@@ -72,8 +72,34 @@ npm install --legacy-peer-deps --ignore-scripts
 
 ### 后续已知验证点
 
-- M1a 之前需定义显式 `key/value` 暂存与 tree 对象的精确 JSON schema；不会自动提取历史会话内容。
+- M1a 已定义 manifest、canonical journal、inline tree 与 immutable commit 的精确 JSON schema；读取仅处理显式 `key/value`，不会自动提取历史会话内容。
 - M2 之前需对实际 `Agent` 类型的 send/inbox 投递契约做源码级验证。当前公共服务目录仅直接保证 live-agent 查询和 inbox 事件观察，不能把文中 `agent.send` 写死为已证实事实。
+
+---
+
+## 0.2 M1a 实施记录（2026-08-17）
+
+### 已交付
+
+- 包版本提升至 `@dsh-external/local-git-4-llm@0.2.0`，M1a host 注册 `repo_status`、`repo_log`、`repo_diff`、`repo_pull`、`repo_issue_list` 与 `repo_issue_get`。
+- 工具只从 `exec.agent?.session.header.cwd` 推导当前会话工作区，再经 `workspaceRegistry.resolveByPath()` 取得 canonical workspace；不接受模型传入的路径，也不扫描所有工作区。
+- 只识别工作区内显式存在的 `.dsh-repo/manifest.json` 与 `journal.jsonl`。manifest 固化 `workspaceId`，与当前注册工作区不匹配时 fail closed。
+- journal 强制 UTF-8、单个 LF 结尾、逐行 canonical JSON、连续 `seq`、`prev` checksum 链和 `sha256:` checksum；commit/tree 内联于 journal，因此重放不信任任何派生 refs 或 objects 文件。
+- key 为受限逻辑标识，value 为 lossless JSON；tree 与 commit 都以 canonical JSON 计算不可变 SHA-256 ID。`repo_pull` 有记录数与总字节上限、cursor，`repo_diff` 默认只返回 value hash。
+- `repo_log` 只投影 commit id、parent、tree、message、kind 与时间；journal 内部的 author session/message 标识不出现在模型工具结果中。
+- M1a 只读取和报告健康状态：不自动初始化、不采用工作区、不建立 lock、不截断尾行、不自愈、不写 backup；这些写入能力全部保留给 M1b/M4。
+- 悬浮入口复用官方 `FishLogo`；其前景/表面/hover/focus 仅使用 `--dsw-alias-*` token，浅色主题呈深色鲸鱼、深色主题呈浅色鲸鱼。
+
+### 验收结果
+
+| 检查 | 结果 |
+|---|---|
+| `dev_build_plugin` | 通过：host `tsc`、client `tsdown`、`dsh-external-local-git-4-llm-0.2.0.tgz` 均生成 |
+| `npm run typecheck` | 通过：Windows 原生 TypeScript 无报错 |
+| `npm run test:m1a` | 通过：8/8，覆盖重放、key/value、issue projection、无仓不落盘、取消信号、首条初始化约束、workspaceId 与 junction 边界、checksum/截断尾/重复 key 检测 |
+| 本包热重载 | 通过：host/client active；6 个 `repo_*` 工具已出现在 live Tool registry |
+| live `repo_status` smoke | 通过：当前未初始化工作区返回结构化 `REPO_NOT_INITIALIZED`，未创建任何仓库文件 |
+| 实际浏览器 Slot | 通过：隔离 headless 页面检测到官方鲸鱼 SVG、主题 token CSS 和 M1a 面板 |
 
 ---
 
@@ -88,7 +114,7 @@ npm install --legacy-peer-deps --ignore-scripts
 | R3 | **同步对仓库的认识** | §4.3：`/repo init` 建库 → 扫描自动注入（工具 agent-scope + prompt 桥）→ pull/merge（key 级三方合并）→ 变更插话/预注入（`agent.send` inbox）；冲突自动转 issue |
 | R4 | 支持**自动备份** | §4.4：三时机备份 + zstd 压缩 + hash 校验 + 保留策略 |
 | R5 | 原生 WebUI **悬浮球**，打开即**跟踪看板**，完全遵循 DSW 美术风格 | §4.5：`shell.overlay` + `--dsw-alias-*` tokens |
-| R6 | 看板可**分析跟踪仓库情况、执行回滚** | §4.5/§4.6：状态分析端点 + 回滚向导（先备份→diff 预览→审批→revert commit） |
+| R6 | 看板可**分析跟踪仓库情况、执行回滚** | §4.5/§4.6：状态分析端点 + 回滚向导（先备份→diff 预览→revert commit） |
 | R7 | 插件行为在 **DSH 轨迹日志可见**，且有 **tool 注册** | §4.7：全部操作注册为工具 + journal + 工具卡片 + telemetry |
 | R8 | **每个工作区都有自己的完整管理器**，出问题**可追溯** | §4.8：Manager 实例隔离 + 事件溯源 + 审计 + 自愈 |
 
@@ -227,7 +253,7 @@ issue = {
 
 1. **建库：`/repo init` 命令（人工首选入口）**
    - `commands.register({ name: 'repo', description, handler })`：handler 直接对接收 agent 执行（**不走模型**）——从 `invocation.agent.session` 的 cwd 解析工作区 → 可写性探测 → 写 `.dsh-repo/manifest.json` → 初始 commit `repo:init` → 写 README 桥文件 → 返回 CommandResult。
-   - 结果卡片经 `conversation.chat.commandview`（key=`repo`，官方 slot 空位）渲染；`/repo status`、`/repo log`、`/repo rollback <commit>` 走同一注册器（回滚 handler 内部复用审批流）。
+- 结果卡片经 `conversation.chat.commandview`（key=`repo`，官方 slot 空位）渲染；`/repo status`、`/repo log`、`/repo rollback <commit>` 走同一注册器（回滚 handler 内部复用备份与 revert 流程）。
    - 等价入口并存：`repo_adopt` 工具（AI 自主建库）、看板 UI「纳入管理」。三者共享同一 adopt 内核，幂等。
 
 2. **扫描自动注入（工具 + 信息，建库后自动生效）**
@@ -272,7 +298,7 @@ issue = {
 | 悬浮球 | `shell.overlay`（id=`repo-fab`，order 高） | 固定右下角圆形按钮：仓库色 brand token、未处理 issue 徽标、点按开合看板；拖拽位置记忆（localStorage） |
 | 看板抽屉 | `shell.overlay` 同一入口（React state 控制显隐，Airbnb 式浮层） | 右侧抽屉（shadow + overlay token），约 720px |
 | 各工具卡片 | `tool.call.toolview`（key=`repo_*`） | commit/issue/rollback 命令的专属可视化卡片（hash 徽标、作者会话、diff 摘要、一键 rollback 按钮） |
-| 设置页 | `settings.section`（id=`repo-suite`） | 管理目录、备份间隔、保留数、回滚审批开关、通知策略 |
+| 设置页 | `settings.section`（id=`repo-suite`） | 管理目录、备份间隔、保留数、通知策略 |
 | 会话快捷入口 | `conversation.session.header.actions`/`utilities`（P2） | 仓库状态指示灯/快速打开看板 |
 
 **看板四个页签（严格 DSW 风格）：**
@@ -280,7 +306,7 @@ issue = {
 1. **看板（Issues）**：Kanban 列 `open → assigned → in_progress → resolved → closed`，卡片 = 标题/状态色条/label/@会话/时间；点卡片 → 详情抽屉（timeline + 原文回溯跳转——用 `sessionQuery` 拿到原文，UI 上跳转对应会话）。
 2. **提交（Commits）**：历史列表（commit hash、author 会话、message、时间），选中 → `repo_diff` 预览（key 级 + 行级 diff 高亮）、「复制 hash」「打开来源会话」、危险区「回滚到此」。
 3. **状态（Status & Analysis）**：HEAD / 分支 / 未同步变更 / 陈旧 knowledge 列表 / 各会话贡献统计（issue、commit、触及 key）/ 风险标志（未决提及、备份失败、journal 修复记录）；「运行分析」按钮 → host `/repo/api` analysis 端点，可选 LLM 摘要（`ctx.llm`，P2）。
-4. **恢复（Backups & Rollback）**：备份列表（时间/大小/校验状态/verify 按钮）+ 回滚向导：选 commit → 预览 diff → 「开始回滚」（host 强制先备份 + 审批流）→ 显示 revert commit 结果。
+4. **恢复（Backups & Rollback）**：备份列表（时间/大小/校验状态/verify 按钮）+ 回滚向导：选 commit → 预览 diff → 「开始回滚」（host 强制先备份）→ 显示 revert commit 结果。
 
 **美术风格协议（R5 合规）**：一律 `var(--dsw-alias-*)` token + `@media (prefers-color-scheme)` 覆盖为 light/dark 双值（Theme provider 明确要求）；字体/圆角/间距对齐 vision-toolkit 的既有写法（`dvt-*` 样式即范例）；不引入外部 UI 库（`dsh-client-ui-primitives` 的 Button/Input 够用）。
 
@@ -293,7 +319,7 @@ repo_rollback --to <commitId> [--scope key1,key2] [--yes]
   1. 校验目标 commit 存在且可回溯（沿 parent 链）
   2. ★ 强制先备份当前状态（时间戳快照 + 校验）
   3. 计算 target.tree ⊖ head.tree 的 diff 预览（dry-run，返回给调用方/AI 展示）
-  4. 审批：工具声明 approval 策略（默认「回滚需审批」，settings 可关）
+4. 执行策略：保留备份与审计记录；当前 DSH 全权限策略为 `never`，不额外插入审批提示。
   5. 执行：将目标 tree 写为当前 tree → 新 commit { kind:'revert', reverts:<commitId> }
   6. journal + audit + 工具结果三处留痕；UI 看板「恢复」页展示前后对比
 ```
@@ -306,7 +332,7 @@ repo_rollback --to <commitId> [--scope key1,key2] [--yes]
 2. **会话轨迹**：每次调用即成为会话 JSONL 中的一条 tool-call（`ui-trajectory` 视图原生可见），客户端再挂 `tool.call.toolview` 卡片把结果渲染为富信息。
 3. **仓库轨迹**：每次操作追加 `journal.jsonl` 一行（`{ op, seq, ts, sessionId, toolCallId?, payload, checksum }`）→ 仓库自身可重放、可审计。
 4. **审计轨迹**：`audit.log` 人类可读行，含 `sessionId | tool | seq | outcome`。
-5. **系统事件**：relay 监听 `tools/result`（观察冻结结果）做状态标脏；**执行前侧**（评审 P7）选配监听 `tools/pre-execute`（回滚审批前加锁、冲突预检等前置校验——`tools/result` 是冻结后的结果，改不了执行前状态）；可选 `sessionTelemetry.emit`（尊重 `sharing` 开关）上报聚合指标。
+5. **系统事件**：relay 监听 `tools/result`（观察冻结结果）做状态标脏；**执行前侧**（评审 P7）选配监听 `tools/pre-execute`（回滚前加锁、冲突预检等前置校验——`tools/result` 是冻结后的结果，改不了执行前状态）；可选 `sessionTelemetry.emit`（尊重 `sharing` 开关）上报聚合指标。
 6. **交叉链接**：工具结果 JSON 内统一带 `opId`（= journal seq），卡片/日志/审计三方对得上。
 
 ### 4.8 R8 — 完整性与可追溯（安全网）
@@ -323,7 +349,7 @@ repo_rollback --to <commitId> [--scope key1,key2] [--yes]
 
 **适配策略：**
 
-1. **按需采纳（Lazy Adoption，评审 P2 解耦后）**：Manager 全部懒加载。**「建仓触发」与「提示」彻底解耦**——`session/created` 只触发**预检 + 提示注入**（见 pt3），**绝不自动建仓**；建仓动作仅由显式入口发起：①**`/repo init` 命令**（人工首选，§4.3 pt1）；②`repo_adopt` 工具（AI 自主）；③会话首次调用 `repo_*` 工具（如 `repo_pull` 对未纳仓工作区自动转为 adopt 流程）。初始化幂等：探测可写性 → 写 `.dsh-repo/manifest.json`（`schemaVersion`、`pluginVersion`、`workspaceId`）→ 初始 commit `repo:init`（payload 仅工作区元数据：会话数、最早/最近活动、目录名，**不含任何会话内容**）→ 写 `README.md` 桥文件。若发现已存在他人/旧版仓库 → 冻结为只读并提示人工确认，绝不覆盖。
+1. **按需采纳（Lazy Adoption，评审 P2 解耦后）**：Manager 全部懒加载。**「建仓触发」与「提示」彻底解耦**——`session/created` 只触发**预检 + 提示注入**（见 pt3），**绝不自动建仓**；建仓动作仅由显式入口发起：①**`/repo init` 命令**（人工首选，§4.3 pt1）；②`repo_adopt` 工具。任何只读 `repo_*` 调用都只报告未初始化，绝不转为 adopt 流程。初始化幂等：探测可写性 → 写 `.dsh-repo/manifest.json`（`schemaVersion`、`pluginVersion`、`workspaceId`）→ 初始 commit `repo:init`（payload 仅工作区元数据：会话数、最早/最近活动、目录名，**不含任何会话内容**）→ 写 `README.md` 桥文件。若发现已存在他人/旧版仓库 → 冻结为只读并提示人工确认，绝不覆盖。
 2. **不可写/系统目录降级**：初始化前先做可写性探测；不可写（如 System32）→ 管理器数据落 `~/.dsh/managers/<workspaceId>/external/`（外部存储模式，manifest 记 `storage: external`，UI 徽标提示），可写性恢复后可由 `repo_adopt` 迁回工作区（搬移 + 审计留痕）。
 3. **既有会话零重启适配（P2 修订）**：relay 的 prompt 桥是宿主级 `systemPrompt.section`，**每次组装 step 时求值** → 已运行的会话下一次 step 即收到提示，无需重启/重开。提示分两档（均由 `adopt.promptHint` 控制，默认 true）：
    - 已纳仓工作区 → 一行仓库认知（仓库地址、未读 issue 数、如何 pull/commit）；
@@ -352,7 +378,7 @@ repo_rollback --to <commitId> [--scope key1,key2] [--yes]
 | `repo_issue_get` | issueId | 无 | 详情+回溯 |
 | `repo_backup` | label? | 无 | 手动快照 |
 | `repo_backups` | — | 无 | 列表+校验态 |
-| `repo_rollback` | to, scope?, yes? | **审批**（默认） | 先备份 → 预览 → revert commit |
+| `repo_rollback` | to, scope?, yes? | 无额外审批（全权限策略） | 先备份 → 预览 → revert commit |
 | `repo_analyze` | scope? | 无 | 状态/贡献/风险分析 |
 | `repo_selfheal` | — | 无（只读修复 journal） | 自愈 |
 | `repo_manager_list` | — | 无 | 各工作区管理器健康 |
@@ -361,7 +387,7 @@ repo_rollback --to <commitId> [--scope key1,key2] [--yes]
 | `repo_import_history` | dryRun?, llm? | 无（P2） | 历史会话摘要回填为知识 commit |
 | `repo_purge` | target | **最高批准** | 物理清理（谨慎） |
 
-**人工命令（非工具，`commands.register`，走 `conversation.chat.commandview` 卡片）**：`/repo init`（建库，§4.3 pt1）、`/repo status`、`/repo log`、`/repo rollback <commit>`（复用审批流）。命令 handler 直接对 agent 执行，不进模型上下文，但 `command/run` 事件落会话日志（轨迹可见）。
+**人工命令（非工具，`commands.register`，走 `conversation.chat.commandview` 卡片）**：`/repo init`（建库，§4.3 pt1）、`/repo status`、`/repo log`、`/repo rollback <commit>`（复用备份与 revert 流程）。命令 handler 直接对 agent 执行，不进模型上下文，但 `command/run` 事件落会话日志（轨迹可见）。
 
 ---
 
@@ -392,7 +418,7 @@ repo_rollback --to <commitId> [--scope key1,key2] [--yes]
 - `notify.mentionInApp`（默认 true——悬浮球徽标 + 看板提示）、`notify.injectInbox`（默认 **true**——PR/commit/issue 变更自动插话在线对话、预注入离线会话；用户明确需求，原 P2 提升为核心）、`notify.pushCooldownMinutes`（默认 10——广播降频）、`notify.pushMaxChars`（默认 200——推送摘要长度）
 - `sync.promptBridge`（默认 true——是否注入会话启动提示段）
 - `analysis.llmSummary`（默认 false，P2）
-- `adopt.auto`（默认 **false**——启动时是否预扫描并自动初始化所有非忽略工作区；**与提示解耦**，默认只由显式 `/repo init`、`repo_adopt` 或首个 `repo_*` 调用建仓）
+- `adopt.auto`（默认 **false**——启动时是否预扫描并自动初始化所有非忽略工作区；**与提示解耦**，默认只由显式 `/repo init` 或 `repo_adopt` 建仓）
 - `adopt.promptHint`（默认 **true**——任意会话下一 step 均收到仓库提示；未纳仓工作区收到「可 /repo init 或 repo_adopt」一行提示，不建仓）
 - `adopt.ignoredWorkspaces`（忽略名单，`repo_ignore` 写入；忽略后连提示也不发）
 
@@ -401,7 +427,7 @@ repo_rollback --to <commitId> [--scope key1,key2] [--yes]
 ## 8. 安全与权限
 
 - 路径安全：管理器只写工作区内 `.dsh-repo/`；所有输入路径经 `fs.resolve` 校验必须落在工作区根内。
-- 审批：`repo_rollback` 默认走 `approval.request`（继承会话策略）；`repo_purge` 必走。
+- 执行策略：`repo_rollback` 和 `repo_purge` 均保留备份/审计；当前全权限策略为 `never`，不请求额外审批。
 - 沙箱：对工作区文件的一切写入遵循现有 fs 沙箱策略；不越权访问其他工作区。
 - 锁：`.manager.lock`（`fs.open(wx)` 语义 + 陈旧锁超时回收），防多进程双写。
 - 备份隐私：备份含知识内容，默认仅本地；提示文档说明可配加密（P2）。
@@ -413,10 +439,10 @@ repo_rollback --to <commitId> [--scope key1,key2] [--yes]
 | 阶段 | 内容 | 验收（含轨迹验证） |
 |---|---|---|
 | **M0 骨架装配** | 单 hybrid 包 `local-git-4-llm` scaffold（core/relay/client 模块目录），走通 注入器链（build→inject），空跑自检；**首日实测 `shell.overlay` 及 `conversation.*` slots 存在性**（评审未核验项） | `dev_plugin_status` 出现插件；`dev_self_test` PASS；空包热重载/卸载即净；slot 实测记录写入文档 |
-| **M1a 纯引擎** | journal/tree/commit/refs/audit/锁/自愈 + **只读工具**（status/log/diff/pull/issue_list/issue_get） | 两个会话先后 commit → `repo_log` 链正确；kill -9 后重放 journal 一致；`session.jsonl` 可见 `repo_*` 调用（轨迹✓） |
-| **M1b 写工具 + 存量适配** | 写工具（commit/issue 写操作/backup/rollback/analyze）+ **现有工作区适配**（懒加载采纳、可写性探测、外部存储降级、忽略名单、workspaceId 定位） | 重复 init 幂等；不可写目录降级到 `~/.dsh/managers/<workspaceId>/external/`；adopt 触发/提示解耦验证（未纳仓会话收到提示但不建仓）；回滚流程走审批生成 revert commit（轨迹✓） |
+| **M1a 纯读取引擎** | manifest + canonical `journal.jsonl` + inline tree/commit replay + **只读工具**（status/log/diff/pull/issue_list/issue_get）；不建立 refs/audit/锁/自愈 | fixture 重放、checksum 链、workspaceId 边界、截断尾与重复 JSON key 检测；`session.jsonl` 可见 `repo_*` 调用（轨迹✓） |
+| **M1b 写工具 + 存量适配** | 写工具（commit/issue 写操作/backup/rollback/analyze）+ **现有工作区适配**（懒加载采纳、可写性探测、外部存储降级、忽略名单、workspaceId 定位） | 重复 init 幂等；不可写目录降级到 `~/.dsh/managers/<workspaceId>/external/`；adopt 触发/提示解耦验证（未纳仓会话收到提示但不建仓）；回滚先备份并生成 revert commit（轨迹✓） |
 | **M2 relay 同步** | `/repo` 命令注册、会话启动预检+提示注入、agent-scope 工具注入、变更**插话/预注入推送**（`agent.send` inbox）、自动备份 `ctx.interval`、冲突→issue、`tools/result` 标脏 + `tools/pre-execute` 前置校验 | 新开会话 prompt 含仓库桥提示（纳仓/未纳仓两档）；已纳仓会话自动获得完整 `repo_*` 工具集（未纳仓仅引导工具）；A 会话 commit → B 在线会话收到插话（inbox splice 落 B 轨迹）、B 离线会话下次打开即见预注入；定时备份生成且 hash 校验过；并发冲突 → 自动 merge/issue 且 journal 有 `conflict` 事件 |
-| **M3 UI 看板** | 悬浮球 + 四页签 + 工具卡片 + 设置页 | 悬浮球出现于原生 WebUI（README 截图留档）；看板数据与 `repo_issue_list`/`repo_log` 一致；回滚向导在审批流下完成 revert（轨迹✓） |
+| **M3 UI 看板** | 悬浮球 + 四页签 + 工具卡片 + 设置页 | 悬浮球出现于原生 WebUI（README 截图留档）；看板数据与 `repo_issue_list`/`repo_log` 一致；回滚向导完成备份和 revert（轨迹✓） |
 | **M4 加固发布** | 崩溃/并发/回滚幂等演练、文档、`dev_release_plugin` 出 tgz | `dev_self_test` 风格回归全绿；回滚→再回滚等价（**HEAD 指针不同但 tree hash 相同**，评审 P4）；README + 本方案更新为验收报告 |
 
 ---
@@ -436,7 +462,7 @@ repo_rollback --to <commitId> [--scope key1,key2] [--yes]
 |---|---|
 | 悬浮球与官方 UI 版本演进冲突 | 只用 `shell.overlay`（replaceRisk:none）+ token 变量；不 replace 官方 seats |
 | 插话/预注入打扰用户与 AI | 摘要化（`pushMaxChars`）+ 同变更去重 + 广播降频（`pushCooldownMinutes`）+ `notify.injectInbox` 可整体关闭；仅通知不代写知识 |
-| 污染/不可写工作区（如 System32） | 按需采纳（建仓=显式 adopt/首个 repo_*）+ 忽略名单 + 可写性探测 + 外部存储降级；`adopt.auto` 默认 false、`adopt.promptHint` 默认 true |
+| 污染/不可写工作区（如 System32） | 按需采纳（建仓=显式 adopt）+ 忽略名单 + 可写性探测 + 外部存储降级；`adopt.auto` 默认 false、`adopt.promptHint` 默认 true |
 | 多进程双写仓库 | `.manager.lock` + 陈旧锁超时 + journal 唯一序号 |
 | 回滚误伤工作区文件 | v1 只回滚知识树；对工作区文件的投影默认关闭并需显式配置 + 审批 |
 | prompt 注入膨胀 | 桥提示 ≤2 行 + 内容按需 `repo_pull` |
@@ -452,7 +478,7 @@ repo_rollback --to <commitId> [--scope key1,key2] [--yes]
 M0：dev_scaffold_plugin（hybrid，单包 local-git-4-llm，内部 core/relay/client 模块目录）
     → dev_build_plugin → dev_inject_plugin → dev_self_test 回归
     → 首日实测 shell.overlay / conversation.* slots（评审未核验项）
-M1a：纯引擎（journal/tree/commit/refs/audit/锁/自愈）+ 只读工具（status/log/diff/pull/issue_list/get）
+M1a：纯读取引擎（manifest + canonical journal + inline tree/commit replay）+ 只读工具（status/log/diff/pull/issue_list/get）✓
 M1b：写工具（commit/issue 写/backup/rollback/analyze）+ 现有工作区适配（adopt/ignore/降级/定位）
     → 双会话实测 → 轨迹断言
 M2：relay 守护（ctx.interval 定时备份、启动预检+提示注入、冲突检测、pre-execute/result 钩子、通知）
