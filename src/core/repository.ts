@@ -13,6 +13,8 @@ import {
   type IssueStatus,
   type JsonValue,
   type KnowledgeRecord,
+  type RepositoryComment,
+  type RepositoryActor,
   type RepositoryDiff,
   type RepositoryManifest,
   type RepositoryStatus,
@@ -69,11 +71,57 @@ interface JournalRecord {
 
 interface Snapshot {
   readonly journalEntries: number
+  readonly tailChecksum: Sha256Id
   readonly head: Sha256Id | null
   readonly commits: ReadonlyMap<Sha256Id, CommitObject>
   readonly trees: ReadonlyMap<Sha256Id, TreeObject>
   readonly values: ReadonlyMap<string, JsonValue>
   readonly issues: ReadonlyMap<string, IssueRecord>
+  readonly comments: ReadonlyMap<string, RepositoryComment>
+}
+
+export interface RepositoryFileObservation {
+  readonly dev: number
+  readonly ino: number
+  readonly size: number
+}
+
+export interface RepositoryDirectoryObservation {
+  readonly dev: number
+  readonly ino: number
+}
+
+/**
+ * Minimal verified state exposed to the M1b writer. It deliberately omits
+ * persistence-only commit authors and filesystem paths.
+ */
+export interface RepositoryMutationState {
+  readonly journalEntries: number
+  readonly tailChecksum: Sha256Id
+  readonly head: Sha256Id | null
+  readonly values: readonly KnowledgeRecord[]
+  readonly issues: readonly IssueRecord[]
+  readonly comments: readonly RepositoryComment[]
+  readonly journal: RepositoryFileObservation
+}
+
+export interface RepositoryCheckout {
+  readonly selector: 'ROOT' | Sha256Id
+  readonly commit: CommitSummary | null
+  readonly records: readonly KnowledgeRecord[]
+}
+
+export interface RepositoryBoardSnapshot {
+  readonly status: RepositoryStatus
+  readonly log: readonly CommitSummary[]
+  readonly checkout: RepositoryCheckout
+  readonly issues: readonly IssueRecord[]
+  readonly comments: readonly RepositoryComment[]
+}
+
+interface StrictTextRead {
+  readonly source: string
+  readonly observation: RepositoryFileObservation
 }
 
 /**
@@ -84,6 +132,7 @@ interface Snapshot {
 export class RepositoryReader {
   private constructor(
     private readonly repositoryRoot: string,
+    private readonly repositoryIdentity: RepositoryDirectoryObservation,
     readonly manifest: RepositoryManifest,
   ) {}
 
@@ -96,26 +145,59 @@ export class RepositoryReader {
       throw new RepositoryReadError('REPO_PATH_ESCAPE', 'Repository directory is not a real directory inside this workspace.')
     }
     const repositoryRoot = await canonicalRepositoryRoot(repositoryPath, workspaceRoot, signal)
+    const repositoryIdentity = await observeRepositoryDirectory(repositoryRoot, signal)
 
     const manifestPath = inside(repositoryRoot, 'manifest.json')
-    const manifestSource = await readStrictText(manifestPath, repositoryRoot, 'manifest.json', 64 * 1024, signal)
+    const manifestSource = (await readStrictFile(manifestPath, repositoryRoot, 'manifest.json', 64 * 1024, signal)).source
     const manifest = parseManifest(manifestSource, expectedWorkspaceId)
-    return new RepositoryReader(repositoryRoot, manifest)
+    await assertRepositoryDirectory(repositoryRoot, repositoryIdentity, signal)
+    return new RepositoryReader(repositoryRoot, repositoryIdentity, manifest)
+  }
+
+  /** @internal Verified journal path for the repository writer only. */
+  journalPathForMutation(): string {
+    return inside(this.repositoryRoot, 'journal.jsonl')
+  }
+
+  /** @internal Verified lock path for the repository writer only. */
+  lockPathForMutation(): string {
+    return inside(this.repositoryRoot, 'write.lock')
+  }
+
+  /** @internal Reject a same-path repository directory replacement. */
+  async assertMutationRoot(signal?: AbortSignal): Promise<void> {
+    await assertRepositoryDirectory(this.repositoryRoot, this.repositoryIdentity, signal)
+  }
+
+  /** @internal Stable identity used to bind a lock to one repository object. */
+  repositoryIdentityForMutation(): RepositoryDirectoryObservation {
+    return { ...this.repositoryIdentity }
+  }
+
+  /**
+   * Replay one exact journal observation for a writer that already owns the
+   * repository lock. The returned value graph is detached from reader state.
+   */
+  async mutationState(signal?: AbortSignal): Promise<RepositoryMutationState> {
+    const { snapshot, journal } = await this.snapshotRead(signal)
+    return {
+      journalEntries: snapshot.journalEntries,
+      tailChecksum: snapshot.tailChecksum,
+      head: snapshot.head,
+      values: [...snapshot.values.entries()].map(([key, value]) => ({
+        key,
+        value: cloneJson(value),
+        valueHash: hashId(value),
+      })),
+      issues: [...snapshot.issues.values()].map(cloneIssue),
+      comments: [...snapshot.comments.values()].map(cloneComment),
+      journal,
+    }
   }
 
   async status(signal?: AbortSignal): Promise<RepositoryStatus> {
     const snapshot = await this.snapshot(signal)
-    return {
-      formatVersion: REPOSITORY_FORMAT_VERSION,
-      repoId: this.manifest.repoId,
-      workspaceId: this.manifest.workspaceId,
-      head: snapshot.head,
-      journalEntries: snapshot.journalEntries,
-      commits: snapshot.commits.size,
-      knowledgeKeys: snapshot.values.size,
-      issues: snapshot.issues.size,
-      integrity: 'ok',
-    }
+    return this.statusFromSnapshot(snapshot)
   }
 
   async log(limit = 50, signal?: AbortSignal): Promise<readonly CommitSummary[]> {
@@ -123,7 +205,50 @@ export class RepositoryReader {
     return [...snapshot.commits.values()]
       .reverse()
       .slice(0, normalizeLimit(limit))
-      .map(({ id, parent, tree, message, kind, createdAt }) => ({ id, parent, tree, message, kind, createdAt }))
+      .map(toCommitSummary)
+  }
+
+  /** Read one immutable tree snapshot without changing HEAD. */
+  async checkout(selector = 'HEAD', signal?: AbortSignal): Promise<RepositoryCheckout> {
+    const snapshot = await this.snapshot(signal)
+    const commit = selectCommit(snapshot, selector)
+    if (commit === null) return { selector: 'ROOT', commit: null, records: [] }
+    const tree = requireTree(snapshot, commit.tree)
+    return {
+      selector: commit.id,
+      commit: toCommitSummary(commit),
+      records: tree.entries.map(({ key, value, valueHash }) => ({ key, value: cloneJson(value), valueHash })),
+    }
+  }
+
+  /** Newest-first explicit administrator/agent discussion entries. */
+  async comments(limit = 100, signal?: AbortSignal): Promise<readonly RepositoryComment[]> {
+    const snapshot = await this.snapshot(signal)
+    return [...snapshot.comments.values()]
+      .reverse()
+      .slice(0, normalizeLimit(limit))
+      .map(cloneComment)
+  }
+
+  /** One replay-consistent projection for the repository management panel. */
+  async board(selector = 'HEAD', limit = 100, signal?: AbortSignal): Promise<RepositoryBoardSnapshot> {
+    const bounded = normalizeLimit(limit)
+    const snapshot = await this.snapshot(signal)
+    const commit = selectCommit(snapshot, selector)
+    const checkout: RepositoryCheckout = commit === null
+      ? { selector: 'ROOT', commit: null, records: [] }
+      : {
+          selector: commit.id,
+          commit: toCommitSummary(commit),
+          records: requireTree(snapshot, commit.tree).entries.map(({ key, value, valueHash }) => ({ key, value: cloneJson(value), valueHash })),
+        }
+    return {
+      status: this.statusFromSnapshot(snapshot),
+      log: [...snapshot.commits.values()].reverse().slice(0, bounded).map(toCommitSummary),
+      checkout,
+      issues: [...snapshot.issues.values()].slice(0, bounded).map(cloneIssue),
+      comments: [...snapshot.comments.values()].reverse().slice(0, bounded).map(cloneComment),
+    }
   }
 
   async diff(from: string | undefined, to: string | undefined, signal?: AbortSignal): Promise<RepositoryDiff> {
@@ -158,9 +283,12 @@ export class RepositoryReader {
   ): Promise<{ readonly records: readonly KnowledgeRecord[]; readonly truncated: boolean; readonly nextCursor?: string }> {
     const snapshot = await this.snapshot(signal)
     const safeLimit = normalizeLimit(limit)
-    const selected = keys === undefined
+    const candidates = keys === undefined
       ? [...snapshot.values.keys()].sort().filter(key => cursor === undefined || key > normalizeKnowledgeKey(cursor))
       : [...new Set(keys.map(normalizeKnowledgeKey))].sort()
+    const selected = cursor === undefined || keys === undefined
+      ? candidates
+      : candidates.filter(key => key > normalizeKnowledgeKey(cursor))
     const records: KnowledgeRecord[] = []
     let bytes = 0
     for (const key of selected) {
@@ -187,18 +315,42 @@ export class RepositoryReader {
 
   async listIssues(limit = 50, signal?: AbortSignal): Promise<readonly IssueRecord[]> {
     const snapshot = await this.snapshot(signal)
-    return [...snapshot.issues.values()].sort((left, right) => left.id.localeCompare(right.id)).slice(0, normalizeLimit(limit))
+    return [...snapshot.issues.values()].sort((left, right) => left.id.localeCompare(right.id)).slice(0, normalizeLimit(limit)).map(cloneIssue)
   }
 
   async getIssue(id: string, signal?: AbortSignal): Promise<IssueRecord | undefined> {
     if (!ISSUE_ID.test(id)) throw new RepositoryReadError('REPO_MANIFEST_INVALID', 'Issue id has an invalid format.')
-    return (await this.snapshot(signal)).issues.get(id)
+    const issue = (await this.snapshot(signal)).issues.get(id)
+    return issue === undefined ? undefined : cloneIssue(issue)
   }
 
   private async snapshot(signal?: AbortSignal): Promise<Snapshot> {
+    return (await this.snapshotRead(signal)).snapshot
+  }
+
+  private statusFromSnapshot(snapshot: Snapshot): RepositoryStatus {
+    return {
+      formatVersion: REPOSITORY_FORMAT_VERSION,
+      repoId: this.manifest.repoId,
+      workspaceId: this.manifest.workspaceId,
+      head: snapshot.head,
+      journalEntries: snapshot.journalEntries,
+      commits: snapshot.commits.size,
+      knowledgeKeys: snapshot.values.size,
+      issues: snapshot.issues.size,
+      integrity: 'ok',
+    }
+  }
+
+  private async snapshotRead(signal?: AbortSignal): Promise<{
+    readonly snapshot: Snapshot
+    readonly journal: RepositoryFileObservation
+  }> {
+    await this.assertMutationRoot(signal)
     const journalPath = inside(this.repositoryRoot, 'journal.jsonl')
-    const journal = await readStrictText(journalPath, this.repositoryRoot, 'journal.jsonl', MAX_JOURNAL_BYTES, signal)
-    return replayJournal(journal, this.manifest)
+    const journal = await readStrictFile(journalPath, this.repositoryRoot, 'journal.jsonl', MAX_JOURNAL_BYTES, signal)
+    await this.assertMutationRoot(signal)
+    return { snapshot: replayJournal(journal.source, this.manifest), journal: journal.observation }
   }
 }
 
@@ -254,6 +406,7 @@ function replayJournal(source: string, manifest: RepositoryManifest): Snapshot {
   const commits = new Map<Sha256Id, CommitObject>()
   const trees = new Map<Sha256Id, TreeObject>()
   const issues = new Map<string, IssueRecord>()
+  const comments = new Map<string, RepositoryComment>()
   let values = new Map<string, JsonValue>()
   let head: Sha256Id | null = null
   let previousChecksum: Sha256Id | null = null
@@ -279,6 +432,18 @@ function replayJournal(source: string, manifest: RepositoryManifest): Snapshot {
       const event = parseCommitEvent(record.payload)
       if (event.commit.parent !== head) throw new RepositoryReadError('COMMIT_PARENT_MISMATCH', 'Commit parent does not match the replayed HEAD.')
       if (event.commit.tree !== event.tree.id) throw new RepositoryReadError('TREE_HASH_MISMATCH', 'Commit tree reference does not match its embedded tree.')
+      if (event.commit.kind === 'rollback') {
+        if (event.commit.restores === null) {
+          if (event.tree.entries.length !== 0) {
+            throw new RepositoryReadError('TREE_HASH_MISMATCH', 'A ROOT rollback must restore the empty tree.')
+          }
+        } else {
+          const restored = commits.get(event.commit.restores)
+          if (restored === undefined || restored.tree !== event.tree.id) {
+            throw new RepositoryReadError('COMMIT_HASH_MISMATCH', 'Rollback audit target does not match its restored tree.')
+          }
+        }
+      }
       const reconstructed = makeTree(treeValues(event.tree))
       if (canonicalJson(reconstructed) !== canonicalJson(event.tree)) {
         throw new RepositoryReadError('TREE_HASH_MISMATCH', 'Commit tree cannot be reconstructed as a canonical snapshot.')
@@ -301,13 +466,51 @@ function replayJournal(source: string, manifest: RepositoryManifest): Snapshot {
       const issue = issues.get(update.id)
       if (issue === undefined) throw new RepositoryReadError('JOURNAL_EVENT_UNSUPPORTED', 'Journal comments on an unknown issue.')
       issues.set(update.id, { ...issue, updatedAt: update.updatedAt })
+    } else if (record.type === 'comment.created') {
+      const comment = parseRepositoryComment(record.payload)
+      if (comments.has(comment.id)) throw new RepositoryReadError('JOURNAL_EVENT_UNSUPPORTED', 'Journal creates the same repository comment twice.')
+      if (comment.issueId !== undefined && !issues.has(comment.issueId)) {
+        throw new RepositoryReadError('JOURNAL_EVENT_UNSUPPORTED', 'Repository comment targets an unknown issue.')
+      }
+      comments.set(comment.id, comment)
+    } else if (record.type === 'comment.delivery.requested') {
+      const request = parseCommentDeliveryRequest(record.payload)
+      const comment = comments.get(request.commentId)
+      if (comment === undefined) throw new RepositoryReadError('JOURNAL_EVENT_UNSUPPORTED', 'Journal queues delivery for an unknown repository comment.')
+      const mentioned = new Set(comment.mentions)
+      if (request.sessionIds.some(sessionId => !mentioned.has(sessionId))) {
+        throw new RepositoryReadError('JOURNAL_EVENT_UNSUPPORTED', 'Repository comment delivery requests must target explicit mentions.')
+      }
+      comments.set(comment.id, {
+        ...comment,
+        deliveryRequestedTo: [...new Set([...comment.deliveryRequestedTo, ...request.sessionIds])],
+      })
+    } else if (record.type === 'comment.delivered') {
+      const delivery = parseCommentDelivery(record.payload)
+      const comment = comments.get(delivery.commentId)
+      if (comment === undefined) throw new RepositoryReadError('JOURNAL_EVENT_UNSUPPORTED', 'Journal delivers an unknown repository comment.')
+      const mentioned = new Set(comment.mentions)
+      if (delivery.sessionIds.some(sessionId => !mentioned.has(sessionId))) {
+        throw new RepositoryReadError('JOURNAL_EVENT_UNSUPPORTED', 'Repository comment delivery targets must be explicit mentions.')
+      }
+      const requested = new Set(comment.deliveryRequestedTo)
+      if (delivery.sessionIds.some(sessionId => !requested.has(sessionId))) {
+        throw new RepositoryReadError('JOURNAL_EVENT_UNSUPPORTED', 'Repository comment delivery must follow a durable delivery request.')
+      }
+      comments.set(comment.id, {
+        ...comment,
+        deliveredTo: [...new Set([...comment.deliveredTo, ...delivery.sessionIds])],
+      })
     } else {
       throw new RepositoryReadError('JOURNAL_EVENT_UNSUPPORTED', `Journal event '${record.type}' is not supported by M1a.`)
     }
     previousChecksum = record.checksum
   }
 
-  return { journalEntries: lines.length, head, commits, trees, values, issues }
+  if (previousChecksum === null) {
+    throw new RepositoryReadError('JOURNAL_TRUNCATED_TAIL', 'Journal contains no complete initialization record.')
+  }
+  return { journalEntries: lines.length, tailChecksum: previousChecksum, head, commits, trees, values, issues, comments }
 }
 
 function parseJournalRecord(line: string, position: number): JournalRecord {
@@ -388,13 +591,20 @@ function parseTreeEntry(value: unknown, index: number): TreeEntry {
 
 function parseCommit(value: unknown): CommitObject {
   const commit = requireRecord(value, 'COMMIT_HASH_MISMATCH', 'Commit must be an object.')
-  assertExactKeys(commit, ['format', 'formatVersion', 'id', 'parent', 'tree', 'message', 'author', 'kind', 'createdAt'], 'COMMIT_HASH_MISMATCH', 'Commit has unsupported fields.')
-  if (commit.format !== COMMIT_FORMAT || commit.formatVersion !== REPOSITORY_FORMAT_VERSION || commit.kind !== 'normal') {
+  const kind = commit.kind
+  if (kind === 'normal') {
+    assertExactKeys(commit, ['format', 'formatVersion', 'id', 'parent', 'tree', 'message', 'author', 'kind', 'createdAt'], 'COMMIT_HASH_MISMATCH', 'Normal commit has unsupported fields.')
+  } else if (kind === 'rollback') {
+    assertExactKeys(commit, ['format', 'formatVersion', 'id', 'parent', 'tree', 'message', 'author', 'kind', 'restores', 'createdAt'], 'COMMIT_HASH_MISMATCH', 'Rollback commit has unsupported fields.')
+  } else {
+    throw new RepositoryReadError('COMMIT_HASH_MISMATCH', 'Commit has an unsupported kind.')
+  }
+  if (commit.format !== COMMIT_FORMAT || commit.formatVersion !== REPOSITORY_FORMAT_VERSION) {
     throw new RepositoryReadError('COMMIT_HASH_MISMATCH', 'Commit has an unsupported format.')
   }
   const author = requireRecord(commit.author, 'COMMIT_HASH_MISMATCH', 'Commit author must be an object.')
   assertAllowedKeys(author, ['sessionId', 'messageId'], 'COMMIT_HASH_MISMATCH', 'Commit author has unsupported fields.')
-  const parsed: CommitObject = {
+  const base = {
     format: COMMIT_FORMAT,
     formatVersion: REPOSITORY_FORMAT_VERSION,
     id: requireHash(commit.id, 'COMMIT_HASH_MISMATCH', 'Commit id must be a SHA-256 id.'),
@@ -405,9 +615,17 @@ function parseCommit(value: unknown): CommitObject {
       sessionId: requireBoundedString(author.sessionId, 256, 'COMMIT_HASH_MISMATCH', 'Commit author sessionId is invalid.'),
       ...(typeof author.messageId === 'string' ? { messageId: requireBoundedString(author.messageId, 256, 'COMMIT_HASH_MISMATCH', 'Commit author messageId is invalid.') } : {}),
     },
-    kind: 'normal',
     createdAt: requireTimestamp(commit.createdAt, 'COMMIT_HASH_MISMATCH', 'Commit createdAt must be ISO-8601 compatible.'),
   }
+  const parsed: CommitObject = kind === 'normal'
+    ? { ...base, kind: 'normal' }
+    : {
+        ...base,
+        kind: 'rollback',
+        restores: commit.restores === null
+          ? null
+          : requireHash(commit.restores, 'COMMIT_HASH_MISMATCH', 'Rollback restores must be ROOT or a SHA-256 commit id.'),
+      }
   const { id: _id, ...unsigned } = parsed
   if (parsed.id !== hashId(unsigned)) throw new RepositoryReadError('COMMIT_HASH_MISMATCH', 'Commit id does not match its canonical payload.')
   return parsed
@@ -417,18 +635,28 @@ function parseIssueOpened(payload: JsonValue): IssueRecord {
   const event = requireRecord(payload, 'JOURNAL_EVENT_UNSUPPORTED', 'Issue opened payload must be an object.')
   assertExactKeys(event, ['issue'], 'JOURNAL_EVENT_UNSUPPORTED', 'Issue opened payload has unsupported fields.')
   const issue = requireRecord(event.issue, 'JOURNAL_EVENT_UNSUPPORTED', 'Opened issue must be an object.')
-  assertAllowedKeys(issue, ['id', 'title', 'body', 'status', 'labels', 'assignee', 'createdAt', 'updatedAt'], 'JOURNAL_EVENT_UNSUPPORTED', 'Opened issue has unsupported fields.')
+  assertAllowedKeys(issue, ['id', 'title', 'body', 'status', 'labels', 'assignee', 'openedBy', 'createdAt', 'updatedAt'], 'JOURNAL_EVENT_UNSUPPORTED', 'Opened issue has unsupported fields.')
   const status = parseIssueStatus(issue.status)
-  if (!Array.isArray(issue.labels) || !issue.labels.every(label => typeof label === 'string')) {
-    throw new RepositoryReadError('JOURNAL_EVENT_UNSUPPORTED', 'Opened issue labels must be a string array.')
+  if (!Array.isArray(issue.labels) || issue.labels.length > 20 || !issue.labels.every(label => typeof label === 'string')) {
+    throw new RepositoryReadError('JOURNAL_EVENT_UNSUPPORTED', 'Opened issue labels must be a bounded string array.')
   }
+  const labels = issue.labels.map(label => requireBoundedString(label, 120, 'JOURNAL_EVENT_UNSUPPORTED', 'Opened issue label is invalid.'))
+  if (new Set(labels).size !== labels.length) throw new RepositoryReadError('JOURNAL_EVENT_UNSUPPORTED', 'Opened issue labels must be unique.')
+  let assignee: string | undefined
+  if (Object.hasOwn(issue, 'assignee')) {
+    assignee = requireBoundedString(issue.assignee, 256, 'JOURNAL_EVENT_UNSUPPORTED', 'Opened issue assignee is invalid.')
+  }
+  const openedBy = Object.hasOwn(issue, 'openedBy')
+    ? parseRepositoryActor(issue.openedBy, 'Opened issue author is invalid.')
+    : undefined
   return {
     id: requireIssueId(issue.id),
     title: requireBoundedString(issue.title, 1_000, 'JOURNAL_EVENT_UNSUPPORTED', 'Opened issue title is invalid.'),
     body: requireBoundedString(issue.body, 16_000, 'JOURNAL_EVENT_UNSUPPORTED', 'Opened issue body is invalid.'),
     status,
-    labels: issue.labels.map(label => requireBoundedString(label, 120, 'JOURNAL_EVENT_UNSUPPORTED', 'Opened issue label is invalid.')),
-    ...(typeof issue.assignee === 'string' ? { assignee: requireBoundedString(issue.assignee, 256, 'JOURNAL_EVENT_UNSUPPORTED', 'Opened issue assignee is invalid.') } : {}),
+    labels,
+    ...(assignee === undefined ? {} : { assignee }),
+    ...(openedBy === undefined ? {} : { openedBy }),
     createdAt: requireTimestamp(issue.createdAt, 'JOURNAL_EVENT_UNSUPPORTED', 'Opened issue createdAt is invalid.'),
     updatedAt: requireTimestamp(issue.updatedAt, 'JOURNAL_EVENT_UNSUPPORTED', 'Opened issue updatedAt is invalid.'),
   }
@@ -448,15 +676,87 @@ function parseIssueComment(payload: JsonValue): { readonly id: string; readonly 
   const event = requireRecord(payload, 'JOURNAL_EVENT_UNSUPPORTED', 'Issue comment payload must be an object.')
   assertAllowedKeys(event, ['id', 'body', 'author', 'updatedAt'], 'JOURNAL_EVENT_UNSUPPORTED', 'Issue comment payload has unsupported fields.')
   requireBoundedString(event.body, 16_000, 'JOURNAL_EVENT_UNSUPPORTED', 'Issue comment body is invalid.')
+  if (Object.hasOwn(event, 'author')) {
+    requireBoundedString(event.author, 256, 'JOURNAL_EVENT_UNSUPPORTED', 'Issue comment author is invalid.')
+  }
   return {
     id: requireIssueId(event.id),
     updatedAt: requireTimestamp(event.updatedAt, 'JOURNAL_EVENT_UNSUPPORTED', 'Issue comment updatedAt is invalid.'),
   }
 }
 
+function parseRepositoryComment(payload: JsonValue): RepositoryComment {
+  const event = requireRecord(payload, 'JOURNAL_EVENT_UNSUPPORTED', 'Repository comment payload must be an object.')
+  assertExactKeys(event, ['comment'], 'JOURNAL_EVENT_UNSUPPORTED', 'Repository comment payload has unsupported fields.')
+  const comment = requireRecord(event.comment, 'JOURNAL_EVENT_UNSUPPORTED', 'Repository comment must be an object.')
+  assertAllowedKeys(comment, ['id', 'body', 'author', 'mentions', 'issueId', 'createdAt'], 'JOURNAL_EVENT_UNSUPPORTED', 'Repository comment has unsupported fields.')
+  if (!Array.isArray(comment.mentions) || comment.mentions.length > 32) {
+    throw new RepositoryReadError('JOURNAL_EVENT_UNSUPPORTED', 'Repository comment mentions must be a bounded array.')
+  }
+  const mentions = comment.mentions.map(value => requireBoundedString(value, 256, 'JOURNAL_EVENT_UNSUPPORTED', 'Repository comment mention is invalid.'))
+  if (new Set(mentions).size !== mentions.length) {
+    throw new RepositoryReadError('JOURNAL_EVENT_UNSUPPORTED', 'Repository comment mentions must be unique.')
+  }
+  return {
+    id: requireIssueId(comment.id),
+    body: requireBoundedString(comment.body, 16_000, 'JOURNAL_EVENT_UNSUPPORTED', 'Repository comment body is invalid.'),
+    author: parseRepositoryActor(comment.author, 'Repository comment author is invalid.'),
+    ...(Object.hasOwn(comment, 'issueId') ? { issueId: requireIssueId(comment.issueId) } : {}),
+    mentions,
+    deliveryRequestedTo: [],
+    deliveredTo: [],
+    createdAt: requireTimestamp(comment.createdAt, 'JOURNAL_EVENT_UNSUPPORTED', 'Repository comment createdAt is invalid.'),
+  }
+}
+
+function parseCommentDelivery(payload: JsonValue): {
+  readonly commentId: string
+  readonly sessionIds: readonly string[]
+} {
+  const event = requireRecord(payload, 'JOURNAL_EVENT_UNSUPPORTED', 'Repository comment delivery payload must be an object.')
+  assertExactKeys(event, ['commentId', 'sessionIds', 'deliveredAt'], 'JOURNAL_EVENT_UNSUPPORTED', 'Repository comment delivery has unsupported fields.')
+  if (!Array.isArray(event.sessionIds) || event.sessionIds.length === 0 || event.sessionIds.length > 32) {
+    throw new RepositoryReadError('JOURNAL_EVENT_UNSUPPORTED', 'Repository comment delivery targets must be a bounded non-empty array.')
+  }
+  const sessionIds = event.sessionIds.map(value => requireBoundedString(value, 256, 'JOURNAL_EVENT_UNSUPPORTED', 'Repository comment delivery target is invalid.'))
+  if (new Set(sessionIds).size !== sessionIds.length) {
+    throw new RepositoryReadError('JOURNAL_EVENT_UNSUPPORTED', 'Repository comment delivery targets must be unique.')
+  }
+  requireTimestamp(event.deliveredAt, 'JOURNAL_EVENT_UNSUPPORTED', 'Repository comment delivery timestamp is invalid.')
+  return { commentId: requireIssueId(event.commentId), sessionIds }
+}
+
+function parseCommentDeliveryRequest(payload: JsonValue): {
+  readonly commentId: string
+  readonly sessionIds: readonly string[]
+} {
+  const event = requireRecord(payload, 'JOURNAL_EVENT_UNSUPPORTED', 'Repository comment delivery request payload must be an object.')
+  assertExactKeys(event, ['commentId', 'sessionIds', 'requestedAt'], 'JOURNAL_EVENT_UNSUPPORTED', 'Repository comment delivery request has unsupported fields.')
+  if (!Array.isArray(event.sessionIds) || event.sessionIds.length === 0 || event.sessionIds.length > 32) {
+    throw new RepositoryReadError('JOURNAL_EVENT_UNSUPPORTED', 'Repository comment delivery request targets must be a bounded non-empty array.')
+  }
+  const sessionIds = event.sessionIds.map(value => requireBoundedString(value, 256, 'JOURNAL_EVENT_UNSUPPORTED', 'Repository comment delivery request target is invalid.'))
+  if (new Set(sessionIds).size !== sessionIds.length) {
+    throw new RepositoryReadError('JOURNAL_EVENT_UNSUPPORTED', 'Repository comment delivery request targets must be unique.')
+  }
+  requireTimestamp(event.requestedAt, 'JOURNAL_EVENT_UNSUPPORTED', 'Repository comment delivery request timestamp is invalid.')
+  return { commentId: requireIssueId(event.commentId), sessionIds }
+}
+
 function parseIssueStatus(value: unknown): IssueStatus {
   if (value === 'open' || value === 'assigned' || value === 'in_progress' || value === 'resolved' || value === 'closed') return value
   throw new RepositoryReadError('JOURNAL_EVENT_UNSUPPORTED', 'Issue status is invalid.')
+}
+
+function parseRepositoryActor(value: unknown, message: string): RepositoryActor {
+  if (value === 'admin') return 'admin'
+  const actor = requireRecord(value, 'JOURNAL_EVENT_UNSUPPORTED', message)
+  assertExactKeys(actor, ['kind', 'sessionId'], 'JOURNAL_EVENT_UNSUPPORTED', message)
+  if (actor.kind !== 'agent') throw new RepositoryReadError('JOURNAL_EVENT_UNSUPPORTED', message)
+  return {
+    kind: 'agent',
+    sessionId: requireBoundedString(actor.sessionId, 256, 'JOURNAL_EVENT_UNSUPPORTED', message),
+  }
 }
 
 function makeTree(values: ReadonlyMap<string, JsonValue>): TreeObject {
@@ -496,6 +796,50 @@ function requireTree(snapshot: Snapshot, id: Sha256Id): TreeObject {
   return tree
 }
 
+function toCommitSummary(commit: CommitObject): CommitSummary {
+  const { id, parent, tree, message, kind, createdAt } = commit
+  return {
+    id,
+    parent,
+    tree,
+    message,
+    kind,
+    ...(commit.kind === 'rollback' ? { restores: commit.restores } : {}),
+    createdAt,
+  }
+}
+
+function cloneIssue(issue: IssueRecord): IssueRecord {
+  return {
+    id: issue.id,
+    title: issue.title,
+    body: issue.body,
+    status: issue.status,
+    labels: [...issue.labels],
+    ...(issue.assignee === undefined ? {} : { assignee: issue.assignee }),
+    ...(issue.openedBy === undefined ? {} : { openedBy: cloneActor(issue.openedBy) }),
+    createdAt: issue.createdAt,
+    updatedAt: issue.updatedAt,
+  }
+}
+
+function cloneComment(comment: RepositoryComment): RepositoryComment {
+  return {
+    id: comment.id,
+    body: comment.body,
+    author: cloneActor(comment.author),
+    ...(comment.issueId === undefined ? {} : { issueId: comment.issueId }),
+    mentions: [...comment.mentions],
+    deliveryRequestedTo: [...comment.deliveryRequestedTo],
+    deliveredTo: [...comment.deliveredTo],
+    createdAt: comment.createdAt,
+  }
+}
+
+function cloneActor(actor: RepositoryActor): RepositoryActor {
+  return actor === 'admin' ? 'admin' : { kind: 'agent', sessionId: actor.sessionId }
+}
+
 function unsignedRecord(record: JournalRecord): Omit<JournalRecord, 'checksum'> {
   const { checksum: _checksum, ...unsigned } = record
   return unsigned
@@ -528,19 +872,39 @@ async function canonicalRepositoryRoot(repositoryPath: string, workspaceRoot: st
   return canonical
 }
 
+async function observeRepositoryDirectory(path: string, signal?: AbortSignal): Promise<RepositoryDirectoryObservation> {
+  assertNotAborted(signal)
+  const current = await lstat(path)
+  if (current.isSymbolicLink() || !current.isDirectory() || current.ino === 0) {
+    throw new RepositoryReadError('REPO_PATH_ESCAPE', 'Repository directory does not have a stable local filesystem identity.')
+  }
+  return { dev: current.dev, ino: current.ino }
+}
+
+async function assertRepositoryDirectory(
+  path: string,
+  expected: RepositoryDirectoryObservation,
+  signal?: AbortSignal,
+): Promise<void> {
+  const current = await observeRepositoryDirectory(path, signal)
+  if (!sameFilesystemObject(current, expected)) {
+    throw new RepositoryReadError('REPO_PATH_ESCAPE', 'Repository directory changed while it was being accessed.')
+  }
+}
+
 /**
  * Read only an object whose resolved path and opened file identity both remain
  * beneath the canonical repository root. The handle is verified before any
  * content is read, closing the lstat/open replacement window for symlinks and
  * junctions that a mutable workspace could otherwise introduce.
  */
-async function readStrictText(
+async function readStrictFile(
   path: string,
   repositoryRoot: string,
   label: string,
   maxBytes: number,
   signal?: AbortSignal,
-): Promise<string> {
+): Promise<StrictTextRead> {
   const entry = await lstatIfExists(path)
   if (entry === undefined) {
     if (label === 'manifest.json') throw new RepositoryReadError('REPO_NOT_INITIALIZED', 'No explicit repository manifest exists for this workspace.')
@@ -566,7 +930,10 @@ async function readStrictText(
     assertNotAborted(signal)
     if (bytes.byteLength > maxBytes) throw new RepositoryReadError('REPO_TOO_LARGE', `${label} exceeds the M1a read limit.`)
     try {
-      return new TextDecoder('utf-8', { fatal: true }).decode(bytes)
+      return {
+        source: new TextDecoder('utf-8', { fatal: true }).decode(bytes),
+        observation: { dev: opened.dev, ino: opened.ino, size: opened.size },
+      }
     } catch {
       throw new RepositoryReadError('JOURNAL_INVALID_UTF8', `${label} is not valid UTF-8.`)
     }
@@ -632,7 +999,7 @@ function isContainedBy(root: string, target: string): boolean {
   return pathFromRoot === '' || (!pathFromRoot.startsWith('..') && !isAbsolute(pathFromRoot))
 }
 
-function sameFilesystemObject(before: Stats, opened: Stats): boolean {
+function sameFilesystemObject(before: Pick<Stats, 'dev' | 'ino'>, opened: Pick<Stats, 'dev' | 'ino'>): boolean {
   // Node reports a stable NTFS file index as `ino`. If a filesystem cannot
   // provide one, M1a cannot safely distinguish a replacement and fails closed.
   if (before.ino === 0 || opened.ino === 0) return false

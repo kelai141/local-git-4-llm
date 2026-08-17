@@ -39,7 +39,7 @@ export interface TreeObject {
   readonly entries: readonly TreeEntry[]
 }
 
-export interface CommitObject {
+interface CommitObjectBase {
   readonly format: typeof COMMIT_FORMAT
   readonly formatVersion: typeof REPOSITORY_FORMAT_VERSION
   readonly id: Sha256Id
@@ -47,9 +47,21 @@ export interface CommitObject {
   readonly tree: Sha256Id
   readonly message: string
   readonly author: { readonly sessionId: string; readonly messageId?: string }
-  readonly kind: 'normal'
   readonly createdAt: string
 }
+
+export interface NormalCommitObject extends CommitObjectBase {
+  readonly kind: 'normal'
+  readonly restores?: never
+}
+
+export interface RollbackCommitObject extends CommitObjectBase {
+  readonly kind: 'rollback'
+  /** Commit restored by this append; null means the empty ROOT tree. */
+  readonly restores: Sha256Id | null
+}
+
+export type CommitObject = NormalCommitObject | RollbackCommitObject
 
 /** Public M1a commit projection. Persistence-only author identifiers stay private. */
 export interface CommitSummary {
@@ -57,11 +69,15 @@ export interface CommitSummary {
   readonly parent: Sha256Id | null
   readonly tree: Sha256Id
   readonly message: string
-  readonly kind: 'normal'
+  readonly kind: 'normal' | 'rollback'
+  readonly restores?: Sha256Id | null
   readonly createdAt: string
 }
 
 export type IssueStatus = 'open' | 'assigned' | 'in_progress' | 'resolved' | 'closed'
+
+/** Public author identity for explicit repository discussions and issues. */
+export type RepositoryActor = 'admin' | { readonly kind: 'agent'; readonly sessionId: string }
 
 export interface IssueRecord {
   readonly id: string
@@ -70,6 +86,7 @@ export interface IssueRecord {
   readonly status: IssueStatus
   readonly labels: readonly string[]
   readonly assignee?: string
+  readonly openedBy?: RepositoryActor
   readonly createdAt: string
   readonly updatedAt: string
 }
@@ -101,4 +118,20 @@ export interface KnowledgeRecord {
   readonly key: string
   readonly value: JsonValue
   readonly valueHash: Sha256Id
+}
+
+/** Administrator-authored repository discussion entry. */
+export interface RepositoryComment {
+  readonly id: string
+  readonly body: string
+  readonly author: RepositoryActor
+  /** Optional issue discussion scope; absent means the repository timeline. */
+  readonly issueId?: string
+  /** Exact session/agent ids explicitly addressed by this comment. */
+  readonly mentions: readonly string[]
+  /** Mention targets durably queued before any live relay attempt. */
+  readonly deliveryRequestedTo: readonly string[]
+  /** Mention targets whose live inbox accepted the relay. */
+  readonly deliveredTo: readonly string[]
+  readonly createdAt: string
 }

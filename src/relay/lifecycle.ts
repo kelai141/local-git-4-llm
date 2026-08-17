@@ -4,9 +4,9 @@ import { LOCAL_GIT_4_LLM_ID } from '../core/manifest.js'
 
 /**
  * Own the host effect so injector reload/unload always disposes it cleanly.
- * M1b-init adds one explicit initialization tool. It still never auto-
- * initializes repositories, reads conversations, or delivers cross-session
- * messages.
+ * The current preview owns explicit writes, the management API, and live
+ * administrator/agent relays. It still never auto-initializes, scans a workspace,
+ * or extracts conversation content.
  */
 export function installLifecycle(ctx: Context, status: RuntimeStatus): void {
   ctx.effect(() => {
@@ -18,5 +18,5 @@ export function installLifecycle(ctx: Context, status: RuntimeStatus): void {
     return () => {
       ctx.logger?.info?.(`[${LOCAL_GIT_4_LLM_ID}] ${status.phase} host disposed`)
     }
-  }, 'local-git-4-llm:m1b-init-host-lifecycle')
+  }, 'local-git-4-llm:m3-preview-host-lifecycle')
 }

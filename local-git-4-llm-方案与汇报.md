@@ -529,3 +529,22 @@ M4：加固 + 演练 + release
 
 ---
 *生成：DeepSeek Harness 代理 · 2026-08-16 · 环境实测依据（Inspect + 本地勘察）*
+
+## 13. 0.5.0 实施进展（2026-08-17）
+
+本轮已把 M1b 写入主链、M2 管理员定向 relay 预览和 M3 看板预览落到同一 hybrid 包：
+
+- `repo_commit`：每次最多 250 个显式 `set/delete`，逻辑 key 受限，单值与 journal 总量有界；每个 commit 内联完整排序 tree，tree/commit/journal 三层 SHA-256 校验。
+- writer：`.dsh-repo/write.lock` 使用 exclusive create；持锁后重新打开 reader，append 前后校验 journal identity/size，fsync 后完整回放；已知陈旧锁不会猜测删除，留给 M4 恢复工具。
+- `repo_checkout`：可按 `HEAD`、`ROOT` 或完整 SHA-256 commit id 读取不可变历史快照，不移动 HEAD。
+- `repo_rollback`：不截断 journal，而是追加 `kind: rollback` 且携带 `restores` 的新 commit；旧 HEAD 与完整 tree 永久保留为 backup/audit。
+- 管理员与智能体评论：`comment.created` / `comment.delivery.requested` / `comment.delivered` 进入同一 checksum 链；评论可属于仓库时间线或指定 Issue，且只能 @ 同一 registered workspace 的 session。
+- 智能体协作工具：新增 `repo_collaborators`、`repo_comment`、`repo_issue_open`、`repo_issue_comment`；Issue 和评论均记录明确作者，不自动摘取会话，在线目标采用“先持久化投递请求、再 steer、最后审计成功”的顺序。
+- 实时注入：Inspect 确认当前 `Agent` 公共 API 为 `agent.steer(UserMessage)` / `agent.inject(UserMessage)`，本实现对在线目标使用 `steer`，消息来源标为 `plugin + form: relay`；不是旧草案中的 `agent.send`。
+- Host 管理 API：`/local-git-4-llm/api` 只接受 `workspaceId`，经 `workspaceRegistry.get()` 解析；每次运行生成 same-origin capability，写请求要求 JSON 和 capability header，不接受 path。
+- Client 看板：继续占用 replaceRisk:none 的 `shell.overlay`；顶部提供已注册工作区/仓库的手动选择器并记住上次选择，所有读取、初始化、回退、评论和 @ 均绑定所选 `workspaceId`，不实施仓库间自动同步；四页签展示历史版本、Issue 内智能体讨论、管理员/智能体评论与投递审计状态；颜色仅使用 DSH theme aliases。
+- 跨仓库安全：回退确认状态同时绑定 `workspaceId + target`，切换仓库清理确认和草稿；异步写操作仅在请求工作区仍是当前选择时更新 UI，避免旧请求污染或误操作新仓库。
+- 浏览器实测：隔离 Edge/CDP 中列出 7 个 registered workspace，手动从 `bot-docs` 切回 `local-git-4-llm` 后 API 只读取对应 workspaceId；切仓会关闭旧回退确认，localStorage 刷新后恢复选择；390×844 下无横向溢出。测试未调用 `/initialize` 或任何真实写 API。
+- 自动扫描源码、自动提取会话、离线 mention 重试/重连对账、workspace-wide 广播、adopt、stale-lock recovery 仍未实现。
+
+当前自动测试：31 项通过，覆盖 M1a reader、显式初始化、commit/no-op/锁/取消、rollback/ROOT、目录替换与 append 故障恢复、管理员/智能体评论、Issue 写入、delivery outbox 先后顺序/audit、管理 API 及智能体讨论工具。

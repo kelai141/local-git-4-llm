@@ -5,12 +5,14 @@ collaboration across conversations. It is designed around GitHub-like concepts:
 append-only commits, issues, a repository board, audit history, backups, and
 safe restore operations.
 
-> **Current phase: M1b-init — explicit repository initialization.**
-> The injected package owns a disposable host lifecycle, an additive
-> `shell.overlay` status FAB, one explicit `repo_init` tool, and six read-only
-> `repo_*` tools. It never initializes automatically, extracts session content,
-> repairs data, overwrites an existing repository, or sends messages between
-> sessions.
+> **Current phase: 0.5.0 / M3 preview.**
+> The injected hybrid package now provides explicit initialization and
+> key/value commits, immutable historical checkout, append-only audited
+> rollback, administrator/agent comments, agent-authored Issues, live
+> `@智能体` relay with a durable delivery outbox, and a Chinese GitHub-inspired
+> repository board with manual repository selection in `shell.overlay`. It
+> still never initializes automatically, scans source files, extracts session content,
+> repairs unknown corruption, or accepts a model/UI supplied filesystem path.
 
 ## Product direction
 
@@ -22,34 +24,43 @@ The complete design is maintained in
 | M0 | Hybrid package scaffold, host/client injection, overlay mounting, build and unload checks |
 | M1a | Checksum-validated journal reader, immutable commit/tree replay, bounded explicit `key/value` queries, and read-only issue projections |
 | M1b-init | Explicit idempotent `repo_init` with same-workspace staging and reader verification |
-| M1b | Explicit key/value and issue writes, backups, rollback, and existing-workspace adoption |
-| M2 | Workspace-aware tool/prompt relay and deduplicated notifications to managed-workspace sessions |
-| M3 | GitHub-inspired issue, commit, status, and recovery board using native DSH theme tokens |
+| M1b | Explicit bounded key/value writes, complete immutable tree snapshots, writer locking, historical checkout, append-only rollback, and agent-authored issue opening (implemented); adoption remains |
+| M2 | Persisted admin/agent comments, issue-scoped discussion, durable delivery requests, and immediate relay to explicitly mentioned live agents (preview); offline retry remains |
+| M3 | Chinese GitHub-inspired code/history/issues/discussion board with theme tokens, manual repository selection, and rollback controls (preview) |
 | M4 | Concurrency, recovery, rollback and release hardening |
 
-## M1 architecture
+## Current architecture
 
 ```text
 src/
   core/canonical.ts      deterministic JSON and SHA-256 addressing
   core/repository.ts     strict read-only manifest/journal reader and replay
   core/initializer.ts    explicit, staged, non-overwriting repository initialization
+  core/writer.ts         exclusive writer lock, commit/issue/comment append, verification, rollback
   core/types.ts          repository, tree, commit, issue, and DTO types
   core/manifest.ts       immutable package facts
+  api/admin.ts           capability-gated same-origin board API; workspace ids only
+  relay/comments.ts      persist-first admin/agent comment outbox and live relay
   relay/lifecycle.ts     host lifecycle owned by the Cordis fiber
   tools/initialize.ts    current-workspace explicit repo_init tool
+  tools/commit.ts        explicit bounded key/value repo_commit tool
+  tools/rollback.ts      append-only audited repo_rollback tool
   tools/read-only.ts     current-workspace repo_status/log/diff/pull/issue readers
-  client/index.ts        additive shell.overlay FAB and status card
+  tools/discussion.ts    repo_collaborators/comment/issue_open/issue_comment tools
+  client/index.ts        additive GitHub-inspired repository management board
   index.ts               host entry point
 ```
 
 The client surface uses `shell.overlay` with a fresh slot id and the official
-Harness `FishLogo`. Its foreground, surface, border, and focus styles use only
-`--dsw-alias-*` theme tokens, so its whale icon is dark in light mode and light
-in dark mode. The visible panel and tool descriptions are localized in Chinese.
-It never replaces DSH's root, conversation, or sidebar UI.
+Harness `FishLogo`. Its foreground, surfaces, borders, state colors, and focus
+styles use DSH theme aliases, so the board follows light/dark theme changes.
+The responsive panel exposes Chinese tabs for logical code snapshots, commit
+history, issues, and administrator/agent comments. A repository selector lists
+registered workspaces and remembers the user's explicit choice; changing it
+does not synchronize or copy repository contents. It never replaces DSH's root,
+conversation, or sidebar UI.
 
-### M1a reader / M1b-init boundary
+### Repository boundary
 
 M1a reads only an already-existing repository at the calling session's
 registered workspace:
@@ -69,16 +80,43 @@ truncated tails. It reports the problem as structured tool data; it never
 attempts to repair or truncate data in M1a. `repo_log` exposes a public commit
 summary only, never the persistence-level author session/message identifiers.
 
-All tools derive the workspace solely from the calling session, not from a
-model-supplied path. `repo_init` is the only M1b write: it creates a complete
+All model tools derive the workspace solely from the calling session. The
+management API accepts only a stable `workspaceId` and resolves it through
+`workspaceRegistry`; it never accepts a path. `repo_init` creates a complete
 canonical seed repository in a unique sibling staging directory, syncs the two
 files, and publishes it without deleting or adopting an existing destination.
-The result is verified through the M1a reader before success is returned. A
-valid existing repository returns idempotently with `initialized: false`; an
-invalid, foreign, symlinked, or junctioned destination is left untouched.
+A valid existing repository returns idempotently; an invalid, foreign,
+symlinked, or junctioned destination is left untouched.
 
-Available tools: `repo_init`, `repo_status`, `repo_log`, `repo_diff`,
-`repo_pull`, `repo_issue_list`, and `repo_issue_get`.
+`repo_commit` applies at most 250 explicit `set`/`delete` mutations to bounded
+logical keys, writes a complete sorted tree snapshot, content-addresses the
+tree and commit, and appends one canonical journal record under an exclusive
+`write.lock`. The writer replays and verifies the result after fsync. It does
+not scan the workspace or read conversation messages. `repo_checkout` reads an
+immutable snapshot by `HEAD`, `ROOT`, or full SHA-256 id.
+
+Rollback is deliberately not a history rewrite. `repo_rollback` and the board
+button append a `kind: rollback` commit whose `restores` field names the target
+snapshot. The prior HEAD and its full tree remain in the journal as the backup,
+so rollback itself is reversible and auditable. The UI requires an explicit
+confirmation but does not insert an additional DSH approval prompt.
+
+Administrator and agent comments are persisted as checksum-linked journal
+events. They may target the repository timeline or one existing Issue. Agents
+explicitly create Issues with `repo_issue_open`, discover valid mention targets
+with `repo_collaborators`, and discuss through `repo_comment` or
+`repo_issue_comment`; no conversation text is harvested automatically. The
+board may use the same explicit `@` mechanism. Before any live relay, every
+explicit mention target is recorded in `comment.delivery.requested`;
+successful delivery is then audited with `comment.delivered`. Targets receive a `form: relay` user
+message through `agent.steer`, so the context enters the closest next step
+while normal tool permissions remain in force. Offline or failed targets remain
+visibly unconfirmed; automatic retry after resume is not implemented yet.
+
+Available tools: `repo_init`, `repo_commit`, `repo_checkout`, `repo_rollback`,
+`repo_status`, `repo_log`, `repo_diff`, `repo_pull`, `repo_issue_list`,
+`repo_issue_get`, `repo_collaborators`, `repo_comment`, `repo_issue_open`, and
+`repo_issue_comment`.
 
 ## Development
 
@@ -101,16 +139,27 @@ Windows junctions, so `dev_build_plugin` and native `npm run typecheck` share
 the same declarations. Set `DSH_RUNTIME_NODE_MODULES` only when the runtime
 cannot be found via `npm root -g`.
 
-## Safety defaults agreed for later milestones
+## Safety defaults
 
 - Adoption remains explicit. M1b-init creates repository data only after an
   explicit `repo_init` call for the current registered workspace.
-- Knowledge writes will receive explicit `key/value` changes in M1b rather
-  than automatically extracting conversation history.
-- Rollback will preserve backups and audit records. The active DSH policy is
-  full access (`never`), so it will not add a separate approval prompt.
-- M2 notifications will target every known session in the same managed
-  workspace, with deduplication, concise summaries, and cooldown controls.
+- Knowledge writes receive only explicit `key/value` changes; automatic source
+  scanning and conversation extraction remain out of scope.
+- Rollback preserves the old HEAD as its immutable backup and records the
+  restored commit id in the new audit commit.
+- The board API uses a per-run same-origin capability and JSON-only writes.
+  Comment mentions and rollback targets are resolved inside one registered
+  workspace.
+- Agent discussion tools bind the recorded author to the calling session and
+  reject calls when that session is not a member of the workspace resolved by
+  `workspaceRegistry.resolveByPath()`.
+- The panel changes repositories only after manual selection (with a current or
+  remembered repository used solely as the initial default); it does not add an
+  automatic repository synchronization path.
+- Writer locks fail closed. A stale lock is not guessed away automatically;
+  crash recovery and lock self-heal remain M4 work.
+- Offline mention retry/reconciliation, deduplication, and cooldown controls
+  remain the next M2 increment.
 
 ## License
 

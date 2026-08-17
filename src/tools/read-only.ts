@@ -77,6 +77,19 @@ export function installReadOnlyTools(ctx: Context): void {
       },
     }),
     defineTool({
+      name: 'repo_checkout',
+      description: '读取当前会话工作区某个不可变提交的完整逻辑源码/知识快照，不改变 HEAD。选择器可用 HEAD、ROOT 或完整 SHA-256 id。',
+      parameters: {
+        selector: { type: 'string', description: '要查看的提交选择器，默认 HEAD。' },
+      },
+      output: OUTPUT,
+      isConcurrencySafe: () => true,
+      async execute(args, exec) {
+        const current = await currentRepository(ctx, exec.agent?.session.header.cwd, exec.signal)
+        return asToolValue(current.error ?? success(await current.reader.checkout(args.selector ?? 'HEAD', exec.signal)))
+      },
+    }),
+    defineTool({
       name: 'repo_pull',
       description: '从当前会话工作区的本地 journal 重新读取并校验受限的显式 key/value 知识。这不是远程同步。',
       parameters: {

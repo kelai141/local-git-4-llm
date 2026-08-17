@@ -1,6 +1,6 @@
 {
   "name": "@dsh-external/local-git-4-llm",
-  "version": "0.3.0",
+  "version": "0.5.0",
   "description": "A workspace-scoped, GitHub-style knowledge repository manager for DSH conversations.",
   "private": true,
   "type": "module",
@@ -23,6 +23,9 @@
     "@deepseek-ai/dsh-client-ui-layout": ">=0.0.1-rc <2",
     "@deepseek-ai/dsh-client-ui-primitives": ">=0.0.1-rc <2",
     "@deepseek-ai/dsh-client-ui-slots": ">=0.0.1-rc <2",
+    "@deepseek-ai/dsh-agent": ">=0.0.1-rc <2",
+    "@deepseek-ai/dsh-host-webserver": ">=0.0.1-rc <2",
+    "@deepseek-ai/dsh-llm": ">=0.0.1-rc <2",
     "@deepseek-ai/dsh-session": ">=0.0.1-rc <2",
     "@deepseek-ai/dsh-tools": ">=0.0.1-rc <2",
     "@deepseek-ai/dsh-workspace": ">=0.0.1-rc <2",
@@ -42,7 +45,10 @@
     "build:client": "tsdown",
     "test:m1a": "npm run build && node --test tests/m1a-reader.test.mjs",
     "test:m1b-init": "npm run build && node --test tests/m1b-init.test.mjs",
-    "test:repository": "npm run build && node --test tests/m1a-reader.test.mjs tests/m1b-init.test.mjs"
+    "test:m1b-commit": "npm run build && node --test tests/m1b-commit.test.mjs",
+    "test:m3-admin-api": "npm run build && node --test tests/m3-admin-api.test.mjs",
+    "test:m3-discussion": "npm run build && node --test tests/m3-discussion-tools.test.mjs",
+    "test:repository": "npm run build && node --test tests/m1a-reader.test.mjs tests/m1b-init.test.mjs tests/m1b-commit.test.mjs tests/m3-admin-api.test.mjs tests/m3-discussion-tools.test.mjs"
   },
   "exports": {
     ".": {
