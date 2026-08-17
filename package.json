@@ -1,6 +1,6 @@
 {
   "name": "@dsh-external/local-git-4-llm",
-  "version": "0.2.0",
+  "version": "0.3.0",
   "description": "A workspace-scoped, GitHub-style knowledge repository manager for DSH conversations.",
   "private": true,
   "type": "module",
@@ -40,7 +40,9 @@
     "build": "bash scripts/build.sh",
     "typecheck": "tsc -p tsconfig.json --noEmit",
     "build:client": "tsdown",
-    "test:m1a": "npm run build && node --test tests/m1a-reader.test.mjs"
+    "test:m1a": "npm run build && node --test tests/m1a-reader.test.mjs",
+    "test:m1b-init": "npm run build && node --test tests/m1b-init.test.mjs",
+    "test:repository": "npm run build && node --test tests/m1a-reader.test.mjs tests/m1b-init.test.mjs"
   },
   "exports": {
     ".": {

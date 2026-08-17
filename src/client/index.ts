@@ -1,9 +1,10 @@
 /**
- * M1a browser entry.
+ * M1b-init browser entry.
  *
  * The shell overlay is intentionally additive: it proves that the package's
- * client half mounts without replacing any shipped DSH surface. The M1a card
- * reports the reader-only boundary; M3 will replace it with a repository board.
+ * client half mounts without replacing any shipped DSH surface. The M1b-init
+ * card reports the explicit-initialization boundary; M3 will replace it with a
+ * repository board.
  */
 import { createElement, useState } from 'react'
 import type { ClientContext } from '@deepseek-ai/dsh-client-runtime/client'
@@ -54,7 +55,7 @@ function LocalGitFab() {
   return createElement('div', { className: 'local-git-4-llm-overlay' },
     open ? createElement('aside', {
       className: 'local-git-4-llm-panel',
-      'aria-label': 'local-git-4-llm status',
+      'aria-label': 'local-git-4-llm 状态面板',
     },
     createElement('header', { className: 'local-git-4-llm-header' },
       createElement('div', { className: 'local-git-4-llm-title' },
@@ -67,33 +68,33 @@ function LocalGitFab() {
         className: 'local-git-4-llm-close',
         type: 'button',
         onClick: toggle,
-        'aria-label': 'Close local-git-4-llm status',
+        'aria-label': '关闭 local-git-4-llm 状态面板',
       }, '×'),
     ),
     createElement('div', { className: 'local-git-4-llm-body' },
       createElement('div', { className: 'local-git-4-llm-status' },
         createElement('span', { className: 'local-git-4-llm-dot', 'aria-hidden': true }),
-        createElement('span', null, 'M1a journal reader mounted'),
+        createElement('span', null, 'M1b 初始化能力已就绪'),
       ),
       createElement('p', { className: 'local-git-4-llm-kicker' },
-        'The current session can inspect only its explicitly initialized workspace journal. M1a does not create repositories, extract session history, or write workspace data.',
+        '当前会话可读取已初始化的工作区日志；现在可通过 repo_init 显式创建仓库。不会自动建仓、提取会话内容或跨会话推送。',
       ),
       createElement('div', { className: 'local-git-4-llm-roadmap' },
-        RoadmapCell('Reader', 'M1a checksum journal + read tools'),
-        RoadmapCell('Writes', 'M1b explicit key/value commits'),
-        RoadmapCell('Relay', 'M2 cross-session sync'),
-        RoadmapCell('Board', 'M3 GitHub-like dashboard'),
+        RoadmapCell('读取', '校验和日志与只读工具'),
+        RoadmapCell('初始化', 'M1b 显式 repo_init'),
+        RoadmapCell('同步', 'M2 跨会话协作'),
+        RoadmapCell('看板', 'M3 GitHub 风格面板'),
       ),
     ),
-    createElement('footer', { className: 'local-git-4-llm-footer' }, 'local-git-4-llm · 0.2.0 · MIT'),
+    createElement('footer', { className: 'local-git-4-llm-footer' }, 'local-git-4-llm · 0.3.0 · MIT'),
     ) : null,
     createElement('button', {
       className: 'local-git-4-llm-fab',
       type: 'button',
       onClick: toggle,
       'aria-expanded': open,
-      'aria-label': open ? 'Close local-git-4-llm' : 'Open local-git-4-llm',
-      title: 'local-git-4-llm M1a',
+      'aria-label': open ? '关闭 local-git-4-llm' : '打开 local-git-4-llm',
+      title: 'local-git-4-llm M1b',
     }, createElement(FishLogo, { size: 27 })),
   )
 }
@@ -101,7 +102,7 @@ function LocalGitFab() {
 export const inject = ['slots']
 
 export function apply(ctx: ClientContext): void {
-  ctx.effect(installStyles, 'local-git-4-llm:m1a-styles')
+  ctx.effect(installStyles, 'local-git-4-llm:m1b-init-styles')
   ctx.slots.inject('shell.overlay', () => ctx.slots.register({
     name: 'shell.overlay',
     id: 'local-git-4-llm-fab',

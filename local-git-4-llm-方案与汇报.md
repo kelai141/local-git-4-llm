@@ -3,7 +3,7 @@
 ## 方案设计与汇报文档（v1）
 
 > 用途：本文件既是对需求的完整应答（方案），也是本阶段工作汇报（汇报）。
-> 状态：`M1a IMPLEMENTED` — hybrid 包已构建、注入并完成 host/client 装配验证；M1a 的主题自适应 Harness 鲸鱼入口、只读 journal 重放引擎和首批 `repo_*` 工具均已验证。下一步为 M1b 的显式写入与采纳流程。
+> 状态：`M1b-init IMPLEMENTED` — hybrid 包已构建、注入并完成 host/client 装配验证；已交付主题自适应 Harness 鲸鱼入口、中文面板、M1a 只读 journal 重放以及 M1b 的显式 `repo_init`。下一步为显式 key/value commit 与 issue 写入。
 
 ---
 
@@ -27,7 +27,7 @@
 - **现有工作区适配** → 按需采纳（`adopt.auto` 默认 false，建仓仅由显式 `/repo init` 或 `repo_adopt` 触发；M1a 的只读 `repo_*` 调用绝不建仓）；prompt 桥对**任意**会话下一 step 注入提示（已纳仓=仓库认知，未纳仓=一行可 adopt 提示，`adopt.promptHint` 默认 true）；不可写目录（如 System32）降级到 `~/.dsh/managers/<workspaceId>` 外部存储；数据定位用 workspaceId 而非 path 哈希（§4.9）
 - 美术风格 → 全部用官方主题 token `--dsw-alias-*`（`bg-layer-1/label-primary/brand-primary/state-error-primary` 等，light/dark 自适应）
 
-**里程碑进度：** M0 hybrid 骨架接入注入器（完成）→ M1a 纯引擎 + 只读工具（完成）→ M1b 写工具 + 现有工作区适配（下一步）→ M2 relay 同步 → M3 UI 看板 → M4 加固/演练/文档。每阶段都有可验证的轨迹验收点（见 §9）。
+**里程碑进度：** M0 hybrid 骨架接入注入器（完成）→ M1a 纯引擎 + 只读工具（完成）→ M1b-init 显式建仓（完成）→ M1b key/value 与 issue 写入（下一步）→ M2 relay 同步 → M3 UI 看板 → M4 加固/演练/文档。每阶段都有可验证的轨迹验收点（见 §9）。
 
 **首要设计决策：** 知识仓库 = **追加式事件溯源日志**（journal）+ **不可变 commit 链**；回滚 = **生成 revert commit**，永不删历史；自动备份 = **提交后 + 定时 + 回滚前**三时机，写后读回校验 hash。这保证「出问题可追溯」不是口号而是数据结构。
 
@@ -100,6 +100,33 @@ npm install --legacy-peer-deps --ignore-scripts
 | 本包热重载 | 通过：host/client active；6 个 `repo_*` 工具已出现在 live Tool registry |
 | live `repo_status` smoke | 通过：当前未初始化工作区返回结构化 `REPO_NOT_INITIALIZED`，未创建任何仓库文件 |
 | 实际浏览器 Slot | 通过：隔离 headless 页面检测到官方鲸鱼 SVG、主题 token CSS 和 M1a 面板 |
+
+---
+
+## 0.3 M1b-init 实施记录（2026-08-17）
+
+### 已交付
+
+- 包版本提升至 `@dsh-external/local-git-4-llm@0.3.0`，新增零参数 `repo_init`；它只从调用会话的 `cwd` 经 `workspaceRegistry.resolveByPath()` 获取已注册工作区，绝不接收模型传入的路径或 workspaceId。
+- `repo_init` 是 M1b 当前唯一写工具：在工作区同级随机 staging 目录中先完整写入并 `sync` canonical `journal.jsonl` 与 `manifest.json`，再通过单次 rename 发布；不会扫描、自动建仓、覆盖、采纳、修复或删除既有 `.dsh-repo`。
+- 发布后必须重新经 M1a reader 回放验证：manifest workspaceId、repoId、`journalEntries = 1` 与 `head = null` 全部匹配才返回成功。有效的同工作区仓库返回 `initialized: false`，字节不变；无效、外部、symlink/junction 或竞争目的地均 fail closed 且保持原状。
+- 新增专用错误结果（既有仓库无效/外部、路径逃逸、发布冲突、I/O、发布后验证失败），不返回路径、临时目录名、Node errno 或堆栈。
+- 悬浮面板、按钮 aria-label、状态和路线图均已中文化；官方 `FishLogo` 与 `--dsw-alias-*` 主题 token 保持不变，因此浅/深主题下仍自动反转鲸鱼前景色。
+
+### 已知边界
+
+- 同父目录 staging + identity/containment 校验可避免常见的中断与并发覆盖；Node 在 Windows 上没有完整的 directory-handle/openat reparse-point 防御。因此它是本地受控工作区中的 fail-closed、尽力原子发布，不宣称可抵御拥有工作区父目录写权限的恶意并发攻击者。
+- 若发布成功后验证失败，仓库将保留供后续明确恢复流程处理；M1b-init 永不自动删除或“修复”它。
+
+### 验收结果
+
+| 检查 | 结果 |
+|---|---|
+| `dev_build_plugin` | 通过：host `tsc`、client `tsdown`、`dsh-external-local-git-4-llm-0.3.0.tgz` 均生成 |
+| `npm run typecheck` | 通过：Windows 原生 TypeScript 无报错 |
+| `npm run test:repository` | 通过：14/14，覆盖 M1a reader 与 M1b-init 的发布、幂等、无效目录/文件不覆盖、junction、取消信号 |
+| live Tool registry | 通过：`repo_init`（零参数）和 6 个中文描述的只读 `repo_*` 工具已注册；未在当前用户工作区执行写入 smoke |
+| 实际浏览器 Slot | 通过：隔离 headless 页面验证 M1b 中文面板、官方鲸鱼 SVG 与浅/深 token 绑定 |
 
 ---
 
@@ -440,7 +467,8 @@ repo_rollback --to <commitId> [--scope key1,key2] [--yes]
 |---|---|---|
 | **M0 骨架装配** | 单 hybrid 包 `local-git-4-llm` scaffold（core/relay/client 模块目录），走通 注入器链（build→inject），空跑自检；**首日实测 `shell.overlay` 及 `conversation.*` slots 存在性**（评审未核验项） | `dev_plugin_status` 出现插件；`dev_self_test` PASS；空包热重载/卸载即净；slot 实测记录写入文档 |
 | **M1a 纯读取引擎** | manifest + canonical `journal.jsonl` + inline tree/commit replay + **只读工具**（status/log/diff/pull/issue_list/issue_get）；不建立 refs/audit/锁/自愈 | fixture 重放、checksum 链、workspaceId 边界、截断尾与重复 JSON key 检测；`session.jsonl` 可见 `repo_*` 调用（轨迹✓） |
-| **M1b 写工具 + 存量适配** | 写工具（commit/issue 写操作/backup/rollback/analyze）+ **现有工作区适配**（懒加载采纳、可写性探测、外部存储降级、忽略名单、workspaceId 定位） | 重复 init 幂等；不可写目录降级到 `~/.dsh/managers/<workspaceId>/external/`；adopt 触发/提示解耦验证（未纳仓会话收到提示但不建仓）；回滚先备份并生成 revert commit（轨迹✓） |
+| **M1b-init 显式建仓** | 当前工作区零参数 `repo_init`；同父目录 staging、canonical manifest/journal、reader 回放验证、无覆盖/无采纳 | 重复 init 幂等且字节不变；无效目录/文件/junction 不修改；取消前不建仓；工具 registry 中零参数 `repo_init`（轨迹✓） |
+| **M1b 写工具 + 存量适配** | 显式 key/value commit、issue 写操作、backup/rollback/analyze + **现有工作区适配**（懒加载采纳、可写性探测、外部存储降级、忽略名单、workspaceId 定位） | commit/issue 写链、不可写目录降级、adopt 触发/提示解耦、回滚先备份并生成 revert commit（轨迹✓） |
 | **M2 relay 同步** | `/repo` 命令注册、会话启动预检+提示注入、agent-scope 工具注入、变更**插话/预注入推送**（`agent.send` inbox）、自动备份 `ctx.interval`、冲突→issue、`tools/result` 标脏 + `tools/pre-execute` 前置校验 | 新开会话 prompt 含仓库桥提示（纳仓/未纳仓两档）；已纳仓会话自动获得完整 `repo_*` 工具集（未纳仓仅引导工具）；A 会话 commit → B 在线会话收到插话（inbox splice 落 B 轨迹）、B 离线会话下次打开即见预注入；定时备份生成且 hash 校验过；并发冲突 → 自动 merge/issue 且 journal 有 `conflict` 事件 |
 | **M3 UI 看板** | 悬浮球 + 四页签 + 工具卡片 + 设置页 | 悬浮球出现于原生 WebUI（README 截图留档）；看板数据与 `repo_issue_list`/`repo_log` 一致；回滚向导完成备份和 revert（轨迹✓） |
 | **M4 加固发布** | 崩溃/并发/回滚幂等演练、文档、`dev_release_plugin` 出 tgz | `dev_self_test` 风格回归全绿；回滚→再回滚等价（**HEAD 指针不同但 tree hash 相同**，评审 P4）；README + 本方案更新为验收报告 |
@@ -464,7 +492,7 @@ repo_rollback --to <commitId> [--scope key1,key2] [--yes]
 | 插话/预注入打扰用户与 AI | 摘要化（`pushMaxChars`）+ 同变更去重 + 广播降频（`pushCooldownMinutes`）+ `notify.injectInbox` 可整体关闭；仅通知不代写知识 |
 | 污染/不可写工作区（如 System32） | 按需采纳（建仓=显式 adopt）+ 忽略名单 + 可写性探测 + 外部存储降级；`adopt.auto` 默认 false、`adopt.promptHint` 默认 true |
 | 多进程双写仓库 | `.manager.lock` + 陈旧锁超时 + journal 唯一序号 |
-| 回滚误伤工作区文件 | v1 只回滚知识树；对工作区文件的投影默认关闭并需显式配置 + 审批 |
+| 回滚误伤工作区文件 | v1 只回滚知识树；对工作区文件的投影默认关闭并需显式配置；保留备份/审计但不增加审批提示 |
 | prompt 注入膨胀 | 桥提示 ≤2 行 + 内容按需 `repo_pull` |
 | journal 无限增长 | 定时快照 + 截断策略（截断后旧的仅存备份），保留策略可配 |
 | DSH 升级破坏注入器 | 沿用 `dsh.bundle.patch`/`dsh.client.inject` 官方机制，版本区间约束在 peerDeps；`dev_self_test` 兜底 |
@@ -479,7 +507,8 @@ M0：dev_scaffold_plugin（hybrid，单包 local-git-4-llm，内部 core/relay/c
     → dev_build_plugin → dev_inject_plugin → dev_self_test 回归
     → 首日实测 shell.overlay / conversation.* slots（评审未核验项）
 M1a：纯读取引擎（manifest + canonical journal + inline tree/commit replay）+ 只读工具（status/log/diff/pull/issue_list/get）✓
-M1b：写工具（commit/issue 写/backup/rollback/analyze）+ 现有工作区适配（adopt/ignore/降级/定位）
+M1b-init：显式 repo_init（同工作区 staging → reader 验证 → 幂等/无覆盖）✓
+M1b：显式 key/value 与 issue 写/backup/rollback/analyze + 现有工作区适配（adopt/ignore/降级/定位）
     → 双会话实测 → 轨迹断言
 M2：relay 守护（ctx.interval 定时备份、启动预检+提示注入、冲突检测、pre-execute/result 钩子、通知）
 M3：UI（悬浮球/看板/卡片/设置）

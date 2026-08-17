@@ -40,7 +40,7 @@ export function installReadOnlyTools(ctx: Context): void {
   const definitions = [
     defineTool({
       name: 'repo_status',
-      description: 'Read the current session workspace repository status. This M1a tool never initializes, repairs, or writes a repository.',
+      description: '读取当前会话工作区的仓库状态。此只读工具不会初始化、修复或写入仓库。',
       parameters: {},
       output: OUTPUT,
       isConcurrencySafe: () => true,
@@ -51,9 +51,9 @@ export function installReadOnlyTools(ctx: Context): void {
     }),
     defineTool({
       name: 'repo_log',
-      description: 'Read immutable commits for the current session workspace. The M1a reader never writes or adopts a repository.',
+      description: '读取当前会话工作区的不可变提交记录。只读 reader 不会写入或采纳仓库。',
       parameters: {
-        limit: { type: 'integer', description: 'Maximum commits to return, from 1 through 250. Defaults to 50.' },
+        limit: { type: 'integer', description: '最多返回的提交数，范围 1–250，默认 50。' },
       },
       output: OUTPUT,
       isConcurrencySafe: () => true,
@@ -64,10 +64,10 @@ export function installReadOnlyTools(ctx: Context): void {
     }),
     defineTool({
       name: 'repo_diff',
-      description: 'Read a key-level diff between immutable commits in the current session workspace. Selectors are HEAD, ROOT, or a full SHA-256 id.',
+      description: '读取当前会话工作区中两个不可变提交之间的 key 级差异。选择器可用 HEAD、ROOT 或完整 SHA-256 id。',
       parameters: {
-        from: { type: 'string', description: 'Base commit selector. Defaults to the parent of to.' },
-        to: { type: 'string', description: 'Target commit selector. Defaults to HEAD.' },
+        from: { type: 'string', description: '基准提交选择器；默认使用 to 的父提交。' },
+        to: { type: 'string', description: '目标提交选择器；默认 HEAD。' },
       },
       output: OUTPUT,
       isConcurrencySafe: () => true,
@@ -78,11 +78,11 @@ export function installReadOnlyTools(ctx: Context): void {
     }),
     defineTool({
       name: 'repo_pull',
-      description: 'Re-read and validate bounded explicit key/value knowledge from the local journal of the current session workspace. This is not remote synchronization.',
+      description: '从当前会话工作区的本地 journal 重新读取并校验受限的显式 key/value 知识。这不是远程同步。',
       parameters: {
-        keys: { type: 'array', items: { type: 'string' }, description: 'Optional logical knowledge keys. Omit to page through the current snapshot.' },
-        limit: { type: 'integer', description: 'Maximum records to return, from 1 through 250. Defaults to 50.' },
-        cursor: { type: 'string', description: 'Exclusive logical-key cursor returned by an earlier repo_pull call.' },
+        keys: { type: 'array', items: { type: 'string' }, description: '可选逻辑知识 key；省略时按当前快照分页。' },
+        limit: { type: 'integer', description: '最多返回的记录数，范围 1–250，默认 50。' },
+        cursor: { type: 'string', description: '上一轮 repo_pull 返回的排他逻辑 key 游标。' },
       },
       output: OUTPUT,
       isConcurrencySafe: () => true,
@@ -93,9 +93,9 @@ export function installReadOnlyTools(ctx: Context): void {
     }),
     defineTool({
       name: 'repo_issue_list',
-      description: 'Read issue projections from the local journal of the current session workspace. M1a never creates or modifies issues.',
+      description: '读取当前会话工作区本地 journal 投影出的 issue。只读 reader 不会创建或修改 issue。',
       parameters: {
-        limit: { type: 'integer', description: 'Maximum issues to return, from 1 through 250. Defaults to 50.' },
+        limit: { type: 'integer', description: '最多返回的 issue 数，范围 1–250，默认 50。' },
       },
       output: OUTPUT,
       isConcurrencySafe: () => true,
@@ -106,9 +106,9 @@ export function installReadOnlyTools(ctx: Context): void {
     }),
     defineTool({
       name: 'repo_issue_get',
-      description: 'Read one issue projection from the local journal of the current session workspace. M1a never creates or modifies issues.',
+      description: '读取当前会话工作区本地 journal 投影出的一个 issue。只读 reader 不会创建或修改 issue。',
       parameters: {
-        id: { type: 'string', required: true, description: 'Exact issue id.' },
+        id: { type: 'string', required: true, description: '准确的 issue id。' },
       },
       output: OUTPUT,
       isConcurrencySafe: () => true,
@@ -129,14 +129,14 @@ async function currentRepository(ctx: Context, cwd: string | undefined, signal: 
   | { readonly reader?: never; readonly error: ToolResult }
 > {
   if (cwd === undefined) {
-    return { error: failure('NO_CALLER_WORKSPACE', 'This repository tool requires a calling session workspace.') }
+    return { error: failure('NO_CALLER_WORKSPACE', '仓库工具需要来自拥有工作区的会话。') }
   }
   try {
     signal.throwIfAborted()
     const workspace = await ctx.workspaceRegistry.resolveByPath(cwd)
     signal.throwIfAborted()
     if (workspace === undefined) {
-      return { error: failure('WORKSPACE_UNREGISTERED', 'The calling session workspace is not registered in DSH.') }
+      return { error: failure('WORKSPACE_UNREGISTERED', '当前会话工作区尚未注册到 DSH。') }
     }
     const reader = await RepositoryReader.open(workspace.path, String(workspace.id), signal)
     if (reader === undefined) {
