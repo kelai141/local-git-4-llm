@@ -1,4 +1,4 @@
-# DSH 工作区知识仓库插件套件（dsh-repo-suite）（计划git仓库名为local-git-4-llm）
+# DSH 工作区知识仓库插件（local-git-4-llm）
 
 ## 方案设计与汇报文档（v1）
 
@@ -9,14 +9,12 @@
 
 ## 0. 汇报摘要（一页速览）
 
-针对「AI 不同对话之间像 GitHub 一样协作」的需求，本方案设计**一套三个插件包 + 一个提示词桥**的插件体系：
+针对「AI 不同对话之间像 GitHub 一样协作」的需求，本方案设计**一套同名 hybrid 插件 + 一个提示词桥**的插件体系：
 
 | 包名 | 形态 | 职责 |
 |---|---|---|
-| `dsh-repo-core` | host 工具包 | 每工作区独立知识仓库引擎：commit / issue / journal / 审计 / 备份 / 回滚的底层实现与全部 `repo_*` 工具 |
-| `dsh-repo-relay` | host 守护循环 | 会话↔仓库同步：`/repo` 命令注册、扫描自动注入（工具按 agent scope + prompt 桥）、PR/commit 变更**插话推送与预注入**（`agent.send` inbox）、跨会话 issue 通知、自动备份定时器、冲突检测、`tools/result`+`tools/pre-execute` 钩子 |
-| `dsh-repo-ui` | client UI 面板 | 原生 WebUI 悬浮球 + 跟踪看板（issue 看板 / 提交历史 / 状态分析 / 备份回滚）+ 各 `repo_*` 工具专属卡片 + 设置页 |
-| `repo-bridge` | agent preset 提示词段 | 告诉每个对话「本工作区有知识仓库，先 pull 再 commit」 |
+| `@dsh-external/local-git-4-llm` | hybrid 插件 | 每工作区独立知识仓库引擎、会话同步 relay、原生 WebUI 看板及全部 `repo_*` 工具 |
+| `local-git-4-llm/bridge` | agent preset 提示词段 | 告诉每个对话「本工作区有知识仓库，先 pull 再 commit」 |
 
 **关键落点（全部已用 Inspect 验证）：**
 
@@ -39,11 +37,12 @@
 
 ### 已交付
 
+- 命名已统一：GitHub 仓库、插件包、运行时 ID、Slot/CSS ID、UI 标题、文档文件名和构建产物全部使用 `local-git-4-llm`；旧标识已退役。
 - Git 根已初始化为 `local-git-4-llm`，远端为 `https://github.com/kelai141/local-git-4-llm.git`，根目录补齐 `MIT` 许可证、README、包元数据与锁文件。
-- 已由 `dev_scaffold_plugin` 生成并收敛为单一 hybrid 包：`@dsh-external/dsh-repo-suite@0.1.0`。
+- 已由 `dev_scaffold_plugin` 生成并收敛为单一 hybrid 包：`@dsh-external/local-git-4-llm@0.1.0`。
 - 目录职责已落位：`src/core/manifest.ts`（不可变 M0 事实）、`src/relay/lifecycle.ts`（由 Cordis fiber 持有的 host 生命周期）、`src/client/index.ts`（`shell.overlay` 悬浮入口）和 host 入口 `src/index.ts`。
 - M0 host **不**注册工具、定时器、提示词、文件写入、会话读取或 inbox 推送；它只记录并随 fiber 卸载的生命周期。这样不会提前污染任意工作区。
-- M0 client 以独立 `id=dsh-repo-suite-fab` 注册到 `shell.overlay`，使用已验证的 `--dsw-alias-*` token。FAB 打开后展示 GitHub 风格的 Repository Suite 状态卡与 M1–M3 路线，不替换 root、conversation 或 sidebar。
+- M0 client 以独立 `id=local-git-4-llm-fab` 注册到 `shell.overlay`，使用已验证的 `--dsw-alias-*` token。FAB 打开后展示 GitHub 风格的 local-git-4-llm 状态卡与 M1–M3 路线，不替换 root、conversation 或 sidebar。
 
 ### 构建兼容性修正
 
@@ -61,13 +60,13 @@ npm install --legacy-peer-deps --ignore-scripts
 
 | 检查 | 结果 |
 |---|---|
-| `dev_build_plugin` | 通过：host `tsc`、client `tsdown`、`dsh-external-dsh-repo-suite-0.1.0.tgz` 均生成 |
+| `dev_build_plugin` | 通过：host `tsc`、client `tsdown`、`dsh-external-local-git-4-llm-0.1.0.tgz` 均生成 |
 | `npm run typecheck` | 通过：Windows 原生 TypeScript 无报错 |
 | `dev_inject_plugin` | 通过：host ✓，client ✓（`lib/client.js`） |
 | 本包热重载 | 通过：清缓存 1 模块、重建 1 active fiber、client ✓ |
 | 本包卸载→重注入 | 通过：entry、junction、client 模块表清理后重新 host/client ✓ |
 | `dev_self_test` | 通过：注入器回归 **8/8 PASS** |
-| 实际浏览器 Slot | 通过：隔离 headless DSH 页面检测到 `.drs-fab` 与 M0 stylesheet；点击后 `.drs-panel` 成功渲染 |
+| 实际浏览器 Slot | 通过：隔离 headless DSH 页面检测到 `.local-git-4-llm-fab` 与 M0 stylesheet；点击后 `.local-git-4-llm-panel` 成功渲染 |
 
 > M0 的可见 UI 与当前正在使用的浏览器页是否即时刷新无关：运行时新注册的 client module 在新页面加载时已实测 mount 成功。M0 不将截图或浏览器测试资料纳入仓库。
 
@@ -155,22 +154,22 @@ npm install --legacy-peer-deps --ignore-scripts
 
 ### 3.2 单包 vs 多包（评审 P6 修订：先单包，三包为演进选项）
 
-**决策：M0 先做单 hybrid 包 `dsh-repo-suite`**，内部按模块目录组织（`src/core/`、`src/relay/`、`src/client/`），一次 scaffold、一次构建、一次注入，跑通端到端。对单用户本地工具，UI 与引擎解耦的收益（独立热重载）有限，而三份 scaffold/构建/peerDeps 矩阵明显增加工时。
+**决策：M0 先做单 hybrid 包 `local-git-4-llm`**，内部按模块目录组织（`src/core/`、`src/relay/`、`src/client/`），一次 scaffold、一次构建、一次注入，跑通端到端。对单用户本地工具，UI 与引擎解耦的收益（独立热重载）有限，而三份 scaffold/构建/peerDeps 矩阵明显增加工时。
 
 **三包一桥作为演进选项**（出现实际需求再拆：UI 更新频繁需与引擎独立热重载、或需单独禁用 relay）：
 
 | 演进包 | peerDeps 关键依赖 | 说明 |
 |---|---|---|
-| `dsh-repo-core` | `dsh-tools`、`dsh-storage-domain`、`dsh-settings`、`dsh-session-title`、`dsh-session-query`、`dsh-host-webserver`、cordis | 纯 host；不依赖 client |
-| `dsh-repo-relay` | core + `dsh-agent`、`dsh-system-prompt`、`dsh-commands`、`@deepseek-ai/cordis-plugin-timer`（`ctx.interval(cb, delay)` mixin）、`dsh-settings` | host 守护：`/repo` 命令、agent-scope 工具注入、`agent.send` 推送器、`ctx.inject(['webServer'])` 模式 |
-| `dsh-repo-ui` | `dsh-client-runtime`、`dsh-client-ui-slots`、`dsh-client-ui-primitives`、`dsh-client-ui-tool`、`dsh-client-locale`、react | client：`dsh.client.inject` 列表如 vision-toolkit |
+| `local-git-4-llm/core` | `dsh-tools`、`dsh-storage-domain`、`dsh-settings`、`dsh-session-title`、`dsh-session-query`、`dsh-host-webserver`、cordis | hybrid 包内纯 host 模块；不依赖 client |
+| `local-git-4-llm/relay` | core + `dsh-agent`、`dsh-system-prompt`、`dsh-commands`、`@deepseek-ai/cordis-plugin-timer`（`ctx.interval(cb, delay)` mixin）、`dsh-settings` | hybrid 包内 host relay：`/repo` 命令、agent-scope 工具注入、`agent.send` 推送器、`ctx.inject(['webServer'])` 模式 |
+| `local-git-4-llm/ui` | `dsh-client-runtime`、`dsh-client-ui-slots`、`dsh-client-ui-primitives`、`dsh-client-ui-tool`、`dsh-client-locale`、react | hybrid 包内 client 模块：`dsh.client.inject` 列表如 vision-toolkit |
 | `repo-bridge` | 无 | agent preset：一段提示词 + 可选 skill，让会话知道何时 pull/commit |
 
 ### 3.3 每工作区独立管理器（R8）
 
 - **Manager 生命周期**：`workspaceRegistry.list()` 启动时枚举 → 每个工作区懒加载一个 `RepoManager` 实例（`repoManagers: Map<WorkspaceId, RepoManager>`），状态 = journal 重放结果。
 - **隔离**：各 Manager 有自己的 journal/tree/issues/backups/audit/锁；互不串写。
-- **Registry 归属**：核心注册表挂在 host 组合（共享、跨会话）——由 `dsh-repo-core` 以 Session 级插件（host 组合行）提供 `repo` 服务；`repoManagers` 表本身即「每个工作区都有自己的管理器」的运行时体现。
+- **Registry 归属**：核心注册表挂在 host 组合（共享、跨会话）——由 `local-git-4-llm/core` 以 Session 级模块提供 `repo` 服务；`repoManagers` 表本身即「每个工作区都有自己的管理器」的运行时体现。
 - **孤儿恢复**：工作区被删除/迁移后，`~/.dsh/managers/<workspaceId>/` 保留控制面记录，可重新挂接或归档。
 - **自愈**（启动 + 手动 `repo_selfheal`）：journal 尾部损坏 → 截断到最后一个校验和通过的行，记 `repair` 事件并开一条 issue 告警；备份 hash 不匹配 → 标记 `degraded` 并尝试上一个备份。
 
@@ -413,7 +412,7 @@ repo_rollback --to <commitId> [--scope key1,key2] [--yes]
 
 | 阶段 | 内容 | 验收（含轨迹验证） |
 |---|---|---|
-| **M0 骨架装配** | 单 hybrid 包 `dsh-repo-suite` scaffold（core/relay/client 模块目录），走通 注入器链（build→inject），空跑自检；**首日实测 `shell.overlay` 及 `conversation.*` slots 存在性**（评审未核验项） | `dev_plugin_status` 出现插件；`dev_self_test` PASS；空包热重载/卸载即净；slot 实测记录写入文档 |
+| **M0 骨架装配** | 单 hybrid 包 `local-git-4-llm` scaffold（core/relay/client 模块目录），走通 注入器链（build→inject），空跑自检；**首日实测 `shell.overlay` 及 `conversation.*` slots 存在性**（评审未核验项） | `dev_plugin_status` 出现插件；`dev_self_test` PASS；空包热重载/卸载即净；slot 实测记录写入文档 |
 | **M1a 纯引擎** | journal/tree/commit/refs/audit/锁/自愈 + **只读工具**（status/log/diff/pull/issue_list/issue_get） | 两个会话先后 commit → `repo_log` 链正确；kill -9 后重放 journal 一致；`session.jsonl` 可见 `repo_*` 调用（轨迹✓） |
 | **M1b 写工具 + 存量适配** | 写工具（commit/issue 写操作/backup/rollback/analyze）+ **现有工作区适配**（懒加载采纳、可写性探测、外部存储降级、忽略名单、workspaceId 定位） | 重复 init 幂等；不可写目录降级到 `~/.dsh/managers/<workspaceId>/external/`；adopt 触发/提示解耦验证（未纳仓会话收到提示但不建仓）；回滚流程走审批生成 revert commit（轨迹✓） |
 | **M2 relay 同步** | `/repo` 命令注册、会话启动预检+提示注入、agent-scope 工具注入、变更**插话/预注入推送**（`agent.send` inbox）、自动备份 `ctx.interval`、冲突→issue、`tools/result` 标脏 + `tools/pre-execute` 前置校验 | 新开会话 prompt 含仓库桥提示（纳仓/未纳仓两档）；已纳仓会话自动获得完整 `repo_*` 工具集（未纳仓仅引导工具）；A 会话 commit → B 在线会话收到插话（inbox splice 落 B 轨迹）、B 离线会话下次打开即见预注入；定时备份生成且 hash 校验过；并发冲突 → 自动 merge/issue 且 journal 有 `conflict` 事件 |
@@ -450,7 +449,7 @@ repo_rollback --to <commitId> [--scope key1,key2] [--yes]
 ## 12. 实施路径（确认后第一步行动）
 
 ```
-M0：dev_scaffold_plugin（hybrid，单包 dsh-repo-suite，内部 core/relay/client 模块目录）
+M0：dev_scaffold_plugin（hybrid，单包 local-git-4-llm，内部 core/relay/client 模块目录）
     → dev_build_plugin → dev_inject_plugin → dev_self_test 回归
     → 首日实测 shell.overlay / conversation.* slots（评审未核验项）
 M1a：纯引擎（journal/tree/commit/refs/audit/锁/自愈）+ 只读工具（status/log/diff/pull/issue_list/get）
@@ -461,7 +460,7 @@ M3：UI（悬浮球/看板/卡片/设置）
 M4：加固 + 演练 + release
 ```
 
-> 命名建议：包名 `dsh-repo-suite`（三包内部子名 `@dsh-repo/core`、`@dsh-repo/relay`、`@dsh-repo/ui` 或扁平 `dsh-repo-core` 等，最终以 registry 命名规范为准）；工具名统一 `repo_*`。
+> 命名决策：GitHub 仓库、hybrid 包、运行时 ID、UI、文档与构建产物统一使用 `local-git-4-llm`；内部模块以 `local-git-4-llm/core`、`local-git-4-llm/relay`、`local-git-4-llm/ui` 表示。工具名保留功能性 `repo_*` 命名空间。
 
 ---
 

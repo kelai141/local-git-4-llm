@@ -1,6 +1,6 @@
-# dsh-repo-suite
+# local-git-4-llm
 
-`dsh-repo-suite` is a DSH-native, workspace-scoped knowledge repository for
+`local-git-4-llm` is a DSH-native, workspace-scoped knowledge repository for
 collaboration across conversations. It is designed around GitHub-like concepts:
 append-only commits, issues, a repository board, audit history, backups, and
 safe restore operations.
@@ -14,7 +14,7 @@ safe restore operations.
 ## Product direction
 
 The complete design is maintained in
-[`dsh-repo-suite-方案与汇报.md`](./dsh-repo-suite-方案与汇报.md).
+[`local-git-4-llm-方案与汇报.md`](./local-git-4-llm-方案与汇报.md).
 
 | Milestone | Deliverable |
 | --- | --- |

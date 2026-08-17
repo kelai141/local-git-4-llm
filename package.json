@@ -1,5 +1,5 @@
 {
-  "name": "@dsh-external/dsh-repo-suite",
+  "name": "@dsh-external/local-git-4-llm",
   "version": "0.1.0",
   "description": "A workspace-scoped, GitHub-style knowledge repository manager for DSH conversations.",
   "private": true,

@@ -1,5 +1,5 @@
 /**
- * Host entry for dsh-repo-suite.
+ * Host entry for local-git-4-llm.
  *
  * M0 deliberately contributes only an owned lifecycle. The append-only
  * journal, tools, relay and workspace storage start in later milestones;
@@ -7,11 +7,11 @@
  * first injection safe to validate and trivial to unload.
  */
 import type { Context } from 'cordis'
-import { createM0Status } from './core/manifest.js'
+import { createLocalGitM0Status } from './core/manifest.js'
 import { installM0Lifecycle } from './relay/lifecycle.js'
 
-export const name = '@dsh-external/dsh-repo-suite'
+export const name = '@dsh-external/local-git-4-llm'
 
 export function apply(ctx: Context): void {
-  installM0Lifecycle(ctx, createM0Status())
+  installM0Lifecycle(ctx, createLocalGitM0Status())
 }
