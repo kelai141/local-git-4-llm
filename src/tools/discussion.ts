@@ -153,7 +153,7 @@ async function resolveCallerWorkspace(
   try {
     const resolved = await resolveRepositoryWorkspace(ctx, agent, signal)
     const workspace = resolved.workspace
-    if (resolved.source !== 'setrepo' && !workspace.sessionIds.some(sessionId => String(sessionId) === String(agent.id))) {
+    if (!workspace.sessionIds.some(sessionId => String(sessionId) === String(agent.id))) {
       return { error: failure('CALLER_OUTSIDE_WORKSPACE', '当前智能体会话不属于解析出的工作区，拒绝记录或发送讨论。') }
     }
     return { agent, workspace }

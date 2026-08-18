@@ -39,6 +39,7 @@
 
 - 新增人类命令 `/setrepo`，支持列出/选择/重置当前仓库及查看、开启、关闭、立即执行文件备份；命令输入不写入通用 command 记录，权威选择以独立 session event 持久化。
 - 所有 `repo_*` 工具统一使用共享 resolver：优先采用人类明确选择并经 `workspaceRegistry.resolveByPath()` 重新校验的仓库，否则回退到调用会话 `cwd`。
+- `/setrepo` 只选择目标，不授予成员资格；Issue/评论类 agent 工具无条件校验 `workspace.sessionIds`，非成员不能借选择事件写入成员作者身份。
 - 中文 `shell.overlay` 看板新增“文件备份”页签；仓库下拉选择会为当前在线会话显式激活仓库。面板可完成选根、风险确认、间隔配置、启停、立即快照、历史/文件分页、文本预览和恢复导出。
 - 管理 API 仍以稳定 `workspaceId/sessionId` 定位，面板启用备份时提交服务端签发的 opaque root ID，不提交绝对工作区路径或任意源路径。
 - 新增独立 `.dsh-repo/backup/`：校验和 journal、SHA-256 对象库、私有 staging 和只新增的 exports。配置、manifest、snapshot 与原始文件 blob 均内容寻址，未变化扫描不追加重复快照。

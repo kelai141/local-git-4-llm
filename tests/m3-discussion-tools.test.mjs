@@ -32,6 +32,9 @@ test('agent tools create issues and relay scoped comments only inside the resolv
       },
     },
     workspaceRegistry: {
+      get(id) {
+        return String(id) === workspace.id ? workspace : undefined
+      },
       async resolveByPath(value) {
         return value === workspacePath ? workspace : undefined
       },
@@ -106,6 +109,26 @@ test('agent tools create issues and relay scoped comments only inside the resolv
   })
   assert.equal(spoofedAuthor.ok, false)
   assert.equal(spoofedAuthor.error.code, 'CALLER_OUTSIDE_WORKSPACE')
+
+  const selectedForeign = await definitions.get('repo_issue_open').execute({
+    title: '不能把 /setrepo 当作成员资格',
+    body: '显式选择仓库只决定目标，不允许非成员伪造该仓库的 agent 作者。',
+    labels: ['security'],
+  }, {
+    signal,
+    agent: {
+      id: 'session-foreign',
+      session: {
+        header: {},
+        events: [{
+          type: 'local-git-4-llm/repository-selected',
+          data: { formatVersion: 1, workspaceId: workspace.id, commandId: 'command-human-selection' },
+        }],
+      },
+    },
+  })
+  assert.equal(selectedForeign.ok, false)
+  assert.equal(selectedForeign.error.code, 'CALLER_OUTSIDE_WORKSPACE')
 
   const reader = await RepositoryReader.open(workspacePath, workspace.id)
   assert.ok(reader)

@@ -52,7 +52,9 @@ Selection is recorded as a durable session event. All `repo_*` tools first use
 that explicit selection, revalidate it through `workspaceRegistry`, and
 otherwise fall back to the calling session's registered `cwd`. The command uses
 `recordInput: false`; the authoritative selection/configuration event is stored
-separately.
+separately. Selection chooses a target; it is not workspace membership. Agent
+Issue/comment tools still require the calling session to belong to the selected
+workspace, preventing a foreign session from being recorded as a member author.
 
 ## Two independent histories
 
