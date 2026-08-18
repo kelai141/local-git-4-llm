@@ -5,10 +5,13 @@ import type {} from '@deepseek-ai/dsh-tools'
 import type {} from '@deepseek-ai/dsh-workspace'
 import { RepositoryReadError } from '../core/repository.js'
 import { RepositoryWriteError, RepositoryWriter } from '../core/writer.js'
+import { WorkspaceSelectionError, resolveRepositoryWorkspace } from '../core/workspace-selection.js'
 
 type ToolErrorCode =
   | 'NO_CALLER_WORKSPACE'
   | 'WORKSPACE_UNREGISTERED'
+  | 'SELECTED_WORKSPACE_UNAVAILABLE'
+  | 'SELECTED_WORKSPACE_INVALID'
   | 'REPO_NOT_INITIALIZED'
   | 'REPO_PATH_ESCAPE'
   | 'REPO_FORMAT_UNSUPPORTED'
@@ -45,7 +48,7 @@ const OUTPUT = {
 export function installRepositoryCommitTool(ctx: Context): void {
   const definition = defineTool({
     name: 'repo_commit',
-    description: '向当前会话已初始化的 local-git-4-llm 仓库显式提交受限 key/value 变更。每次提交都写入完整不可变快照；不会扫描工作区或读取会话内容。',
+    description: '向 /setrepo 激活仓库或当前会话仓库显式提交受限 key/value 变更。每次提交都写入完整不可变快照；不会扫描工作区或读取会话内容。',
     parameters: {
       message: { type: 'string', required: true, description: '提交说明，1–1000 个字符。' },
       set: {
@@ -70,17 +73,11 @@ export function installRepositoryCommitTool(ctx: Context): void {
     isConcurrencySafe: () => false,
     async execute(args, exec) {
       const agent = exec.agent
-      const cwd = agent?.session.header.cwd
-      if (agent === undefined || cwd === undefined) {
+      if (agent === undefined) {
         return asToolValue(failure('NO_CALLER_WORKSPACE', '提交需要来自拥有工作区的会话。'))
       }
       try {
-        exec.signal.throwIfAborted()
-        const workspace = await ctx.workspaceRegistry.resolveByPath(cwd)
-        exec.signal.throwIfAborted()
-        if (workspace === undefined) {
-          return asToolValue(failure('WORKSPACE_UNREGISTERED', '当前会话工作区尚未注册到 DSH。'))
-        }
+        const { workspace } = await resolveRepositoryWorkspace(ctx, agent, exec.signal)
         const result = await RepositoryWriter.commit(workspace.path, String(workspace.id), {
           message: args.message,
           set: args.set,
@@ -105,6 +102,7 @@ function failure(code: ToolErrorCode, message: string): ToolResult {
 }
 
 function writeFailure(error: unknown): ToolResult {
+  if (error instanceof WorkspaceSelectionError) return failure(error.code, error.message)
   if (error instanceof RepositoryWriteError || error instanceof RepositoryReadError) return failure(error.code, error.message)
   if (typeof error === 'object' && error !== null && (error as { name?: unknown }).name === 'AbortError') throw error
   return failure('REPO_WRITE_FAILED', '仓库提交未能安全完成。')

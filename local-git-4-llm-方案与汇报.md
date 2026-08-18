@@ -3,18 +3,18 @@
 ## 方案设计与汇报文档（v1）
 
 > 用途：本文件既是对需求的完整应答（方案），也是本阶段工作汇报（汇报）。
-> 状态：`M1b-init IMPLEMENTED` — hybrid 包已构建、注入并完成 host/client 装配验证；已交付主题自适应 Harness 鲸鱼入口、中文面板、M1a 只读 journal 重放以及 M1b 的显式 `repo_init`。下一步为显式 key/value commit 与 issue 写入。
+> 状态：`0.6.0 / M4 BACKUP PREVIEW IMPLEMENTED` — 已交付 `/setrepo`、面板仓库激活、显式逻辑仓库、协作看板，以及需人类确认后才工作的内容寻址文件自动备份。本文后续保留了早期路线推演；若与本节或 README 冲突，以当前实现记录为准。
 
 ---
 
 ## 0. 汇报摘要（一页速览）
 
-针对「AI 不同对话之间像 GitHub 一样协作」的需求，本方案设计**一套同名 hybrid 插件 + 一个提示词桥**的插件体系：
+针对「AI 不同对话之间像 GitHub 一样协作」的需求，当前实现收敛为**一个同名 hybrid 插件**；早期规划的自动提示词桥尚未启用，避免在未纳仓会话中静默注入：
 
 | 包名 | 形态 | 职责 |
 |---|---|---|
 | `@dsh-external/local-git-4-llm` | hybrid 插件 | 每工作区独立知识仓库引擎、会话同步 relay、原生 WebUI 看板及全部 `repo_*` 工具 |
-| `local-git-4-llm/bridge` | agent preset 提示词段 | 告诉每个对话「本工作区有知识仓库，先 pull 再 commit」 |
+| `local-git-4-llm/bridge` | 暂缓 | 早期设想；0.6.0 不自动向会话注入仓库内容或提示 |
 
 **关键落点（全部已用 Inspect 验证）：**
 
@@ -27,9 +27,42 @@
 - **现有工作区适配** → 按需采纳（`adopt.auto` 默认 false，建仓仅由显式 `/repo init` 或 `repo_adopt` 触发；M1a 的只读 `repo_*` 调用绝不建仓）；prompt 桥对**任意**会话下一 step 注入提示（已纳仓=仓库认知，未纳仓=一行可 adopt 提示，`adopt.promptHint` 默认 true）；不可写目录（如 System32）降级到 `~/.dsh/managers/<workspaceId>` 外部存储；数据定位用 workspaceId 而非 path 哈希（§4.9）
 - 美术风格 → 全部用官方主题 token `--dsw-alias-*`（`bg-layer-1/label-primary/brand-primary/state-error-primary` 等，light/dark 自适应）
 
-**里程碑进度：** M0 hybrid 骨架接入注入器（完成）→ M1a 纯引擎 + 只读工具（完成）→ M1b-init 显式建仓（完成）→ M1b key/value 与 issue 写入（下一步）→ M2 relay 同步 → M3 UI 看板 → M4 加固/演练/文档。每阶段都有可验证的轨迹验收点（见 §9）。
+**里程碑进度：** M0–M3 已完成 preview；M4 已完成 `/setrepo`、显式启用文件快照、自动调度、恢复导出、面板闭环与首轮安全加固，现处于构建/运行时验收阶段。
 
-**首要设计决策：** 知识仓库 = **追加式事件溯源日志**（journal）+ **不可变 commit 链**；回滚 = **生成 revert commit**，永不删历史；自动备份 = **提交后 + 定时 + 回滚前**三时机，写后读回校验 hash。这保证「出问题可追溯」不是口号而是数据结构。
+**首要设计决策：** 逻辑知识仓库与物理文件备份使用两个独立追加日志；逻辑回滚生成新 commit，文件恢复只导出新副本。文件内容只有在人类从面板或 `/setrepo` 明确选根、确认未加密风险并启用后才会扫描。
+
+---
+
+## 0.0 0.6.0 / M4 文件备份实施记录（2026-08-18）
+
+### 本轮交付
+
+- 新增人类命令 `/setrepo`，支持列出/选择/重置当前仓库及查看、开启、关闭、立即执行文件备份；命令输入不写入通用 command 记录，权威选择以独立 session event 持久化。
+- 所有 `repo_*` 工具统一使用共享 resolver：优先采用人类明确选择并经 `workspaceRegistry.resolveByPath()` 重新校验的仓库，否则回退到调用会话 `cwd`。
+- 中文 `shell.overlay` 看板新增“文件备份”页签；仓库下拉选择会为当前在线会话显式激活仓库。面板可完成选根、风险确认、间隔配置、启停、立即快照、历史/文件分页、文本预览和恢复导出。
+- 管理 API 仍以稳定 `workspaceId/sessionId` 定位，面板启用备份时提交服务端签发的 opaque root ID，不提交绝对工作区路径或任意源路径。
+- 新增独立 `.dsh-repo/backup/`：校验和 journal、SHA-256 对象库、私有 staging 和只新增的 exports。配置、manifest、snapshot 与原始文件 blob 均内容寻址，未变化扫描不追加重复快照。
+- 调度器启动时只用轻量 backup marker 建立已配置索引；之后仅已启用仓库进入 60 秒协调，不对未启用仓库读取文件内容。
+- 首版取消“整个工作区一键扫描”，只允许 1–16 个明确根；固定排除仓库元数据、生成目录及常见凭据/密钥位置。备份未加密、不上传，必须由人类确认风险。
+- 扫描采用排序遍历、realpath containment、symlink/junction/special-file 拒绝、打开文件身份校验及第二轮观察；这是协作式本地文件系统上的逐文件尽力一致性，不宣称 VSS/全局原子性或抵抗恶意竞态。
+- 恢复 v1 只导出到 `.dsh-repo/backup/exports/export_<uuid>`，不覆盖源文件。导出一旦对用户可见，即使尾随审计验证失败也不会删除恢复字节。
+- 加入独立 capture lock、2 GiB 对象库预算（保守预留一个最大快照）、64 MiB 单文件、512 MiB/10,000 文件单快照、100 快照、深度 32 等 fail-closed 限制；不自动 prune，不猜删陈旧锁。
+
+### 当前验证
+
+- `npm run typecheck`：通过。
+- repository/M4 自动化套件 **37/37 通过**，覆盖逻辑仓库回归、管理 API、面板后端 token/嵌套目录选择、`/setrepo`、文件/二进制快照、去重、排除、junction、锁、对象损坏、导出和 scheduler 初始自动快照。
+- `dev_build_plugin` 与确定性热重载通过；运行时确认 `setrepo` command 已注册。专用临时注册工作区完成 enable → capture → preview → export → disable 全链路，随后注销并删除，无残留且未触碰当前工作区。
+- 真实浏览器验证“文件备份”页签存在；仓库选择器已由 Windows 原生 `<select>` 改为主题化 listbox，暗色 hover 无白底闪烁，菜单关闭/工作区激活行为正常。
+- Windows 目录 `fsync` 已与既有 initializer 一致处理为文件已同步、目录同步 POSIX-only；WSL localhost/NAT 乱码仍为外部无害诊断。
+
+### 明确不做
+
+- 安装或热重载后自动初始化/自动扫源；
+- LLM 工具直接开启物理备份或提供源路径；
+- 自动上传、自动清理历史、原地覆盖恢复、未知损坏自修复；
+- 自动抽取聊天记录；
+- 将 Node 文件遍历描述成全局原子文件系统快照。
 
 ---
 

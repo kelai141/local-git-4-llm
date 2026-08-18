@@ -47,6 +47,8 @@ if (!runtime) {
 
 for (const [name, relative] of [
   ['cordis', '@deepseek-ai/cordis'],
+  ['@deepseek-ai/cordis-plugin-timer', '@deepseek-ai/cordis-plugin-timer'],
+  ['@deepseek-ai/dsh-commands', '@deepseek-ai/dsh-commands'],
   ['@deepseek-ai/dsh-client-runtime', '@deepseek-ai/dsh-client-runtime'],
   ['@deepseek-ai/dsh-client-ui-slots', '@deepseek-ai/dsh-client-ui-slots'],
   ['@deepseek-ai/dsh-client-ui-layout', '@deepseek-ai/dsh-client-ui-layout'],

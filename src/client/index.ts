@@ -1,4 +1,4 @@
-import { createElement, useEffect, useMemo, useRef, useState, type ChangeEvent, type KeyboardEvent as ReactKeyboardEvent } from 'react'
+import { createElement, useEffect, useMemo, useRef, useState, type ChangeEvent, type FocusEvent as ReactFocusEvent, type KeyboardEvent as ReactKeyboardEvent } from 'react'
 import type { ClientContext, SessionListState, WorkspaceListState, WorkspaceView } from '@deepseek-ai/dsh-client-runtime/client'
 import type { SnapshotSelectorHook } from '@deepseek-ai/dsh-client-ui-slots'
 import type {} from '@deepseek-ai/dsh-client-ui-layout/client'
@@ -9,7 +9,7 @@ const STYLE_ID = 'local-git-4-llm-style'
 const API_ROOT = '/local-git-4-llm/api'
 const WORKSPACE_STORAGE_KEY = 'local-git-4-llm:selected-workspace'
 
-type TabId = 'code' | 'history' | 'issues' | 'discuss'
+type TabId = 'code' | 'backup' | 'history' | 'issues' | 'discuss'
 type JsonValue = null | boolean | number | string | JsonValue[] | { [key: string]: JsonValue }
 type RollbackValue = CommitSummary | { id: 'ROOT'; message: string }
 
@@ -50,6 +50,69 @@ interface RepositoryComment {
   createdAt: string
 }
 
+interface FileBackupSnapshotSummary {
+  id: string
+  parent: string | null
+  reason: 'initial' | 'scheduled' | 'manual' | 'pre-restore'
+  capturedAt: string
+  repositoryHead: string | null
+  fileCount: number
+  totalBytes: number
+  ignoredFiles: number
+}
+
+interface FileBackupEntry {
+  path: string
+  size: number
+  mode: number
+  mtimeMs: number
+  blob: string
+}
+
+interface FileBackupView {
+  configured: boolean
+  enabled: boolean
+  integrity: 'ok' | 'error'
+  journalEntries: number
+  snapshots: number
+  config?: {
+    id: string
+    scope: { kind: 'workspace' } | { kind: 'selected'; roots: string[] }
+    intervalMinutes: number
+    exclusions: 'safe-defaults-v1'
+  }
+  latest?: FileBackupSnapshotSummary
+  nextCaptureAt?: string
+  runtime: {
+    running: boolean
+    lastError?: string
+    lastErrorAt?: string
+  }
+}
+
+interface FileBackupCheckout {
+  snapshot: FileBackupSnapshotSummary
+  records: FileBackupEntry[]
+  nextCursor?: string
+  truncated: boolean
+}
+
+interface FileBackupPreview {
+  snapshotId: string
+  path: string
+  size: number
+  blob: string
+  encoding: 'utf8' | 'binary' | 'too-large'
+  content?: string
+}
+
+interface FileBackupRootCandidate {
+  id: string
+  label: string
+  kind: 'file' | 'directory'
+  selected: boolean
+}
+
 interface BoardData {
   workspace: { id: string; title: string; sessionIds: string[] }
   initialized: boolean
@@ -80,6 +143,7 @@ interface BoardData {
     updatedAt: string
   }[]
   comments?: RepositoryComment[]
+  backup: FileBackupView
 }
 
 interface ApiEnvelope<T> {
@@ -103,7 +167,7 @@ const CSS = `
 .lg4l-fab:hover{background:var(--dsw-alias-bg-layer-2);transform:translateY(-1px)}.lg4l-fab:focus-visible,.lg4l-button:focus-visible,.lg4l-tab:focus-visible,.lg4l-icon-button:focus-visible,.lg4l-select:focus-visible,.lg4l-textarea:focus-visible{outline:3px solid color-mix(in srgb,var(--dsw-alias-brand-primary) 38%,transparent);outline-offset:2px}
 .lg4l-panel{position:relative;width:min(920px,calc(100vw - 36px));height:min(760px,calc(100vh - 104px));min-height:500px;box-sizing:border-box;pointer-events:auto;display:grid;grid-template-rows:auto auto minmax(0,1fr) auto auto;border:1px solid var(--dsw-alias-border-l2);border-radius:16px;background:var(--dsw-alias-bg-base);box-shadow:0 24px 70px color-mix(in srgb,var(--dsw-alias-label-primary) 24%,transparent);overflow:hidden}
 .lg4l-topbar{display:flex;align-items:center;justify-content:space-between;gap:14px;padding:13px 16px;border-bottom:1px solid var(--dsw-alias-border-l1);background:var(--dsw-alias-bg-layer-1)}
-.lg4l-repo-id{min-width:0;display:flex;align-items:center;gap:10px}.lg4l-mark{display:grid;place-items:center;flex:0 0 auto;width:28px;height:28px}.lg4l-repo-copy{min-width:0}.lg4l-repo-line{display:flex;align-items:center;gap:7px;min-width:0;font-size:14px;font-weight:700}.lg4l-owner{color:var(--dsw-alias-label-secondary);font-weight:600}.lg4l-slash{color:var(--dsw-alias-label-secondary)}.lg4l-repo-select{min-width:120px;max-width:360px;height:26px;padding:0 24px 0 5px;border:1px solid transparent;border-radius:6px;background:transparent;color:var(--dsw-alias-label-primary);font:inherit;font-size:14px;font-weight:700;text-overflow:ellipsis;cursor:pointer}.lg4l-repo-select:hover{border-color:var(--dsw-alias-border-l1);background:var(--dsw-alias-bg-layer-2)}.lg4l-repo-select:focus-visible{outline:3px solid color-mix(in srgb,var(--dsw-alias-brand-primary) 38%,transparent);outline-offset:1px}.lg4l-badge{display:inline-flex;align-items:center;min-height:20px;padding:0 7px;border:1px solid var(--dsw-alias-border-l2);border-radius:999px;color:var(--dsw-alias-label-secondary);font-size:10px;font-weight:650}.lg4l-subline{margin-top:2px;color:var(--dsw-alias-label-secondary);font-size:10px}
+.lg4l-repo-id{min-width:0;display:flex;align-items:center;gap:10px}.lg4l-mark{display:grid;place-items:center;flex:0 0 auto;width:28px;height:28px}.lg4l-repo-copy{min-width:0}.lg4l-repo-line{display:flex;align-items:center;gap:7px;min-width:0;font-size:14px;font-weight:700}.lg4l-owner{color:var(--dsw-alias-label-secondary);font-weight:600}.lg4l-slash{color:var(--dsw-alias-label-secondary)}.lg4l-repo-picker{position:relative;min-width:120px;max-width:360px}.lg4l-repo-select{display:flex;align-items:center;justify-content:space-between;gap:8px;width:100%;height:28px;padding:0 7px;border:1px solid transparent;border-radius:6px;background:transparent;color:var(--dsw-alias-label-primary);font:inherit;font-size:14px;font-weight:700;cursor:pointer}.lg4l-repo-select-label{min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}.lg4l-repo-chevron{flex:0 0 auto;color:var(--dsw-alias-label-secondary);font-size:10px}.lg4l-repo-select:hover,.lg4l-repo-select[aria-expanded="true"]{border-color:var(--dsw-alias-border-l1);background:var(--dsw-alias-bg-layer-2)}.lg4l-repo-select:focus-visible{outline:3px solid color-mix(in srgb,var(--dsw-alias-brand-primary) 38%,transparent);outline-offset:1px}.lg4l-repo-menu{position:absolute;z-index:8;top:calc(100% + 5px);left:0;display:grid;width:max-content;min-width:100%;max-width:min(360px,75vw);max-height:260px;padding:5px;overflow:auto;border:1px solid var(--dsw-alias-border-l2);border-radius:8px;background:var(--dsw-alias-bg-overlay);box-shadow:0 14px 36px color-mix(in srgb,var(--dsw-alias-label-primary) 20%,transparent)}.lg4l-repo-option{display:grid;grid-template-columns:16px minmax(0,1fr);gap:6px;width:100%;padding:8px 9px;border:0;border-radius:6px;background:transparent;color:var(--dsw-alias-label-primary);font:inherit;font-size:12px;text-align:left;cursor:pointer}.lg4l-repo-option:hover,.lg4l-repo-option:focus-visible{outline:0;background:var(--dsw-alias-bg-layer-2)}.lg4l-repo-option[data-selected="true"]{color:var(--dsw-alias-brand-primary);font-weight:700}.lg4l-badge{display:inline-flex;align-items:center;min-height:20px;padding:0 7px;border:1px solid var(--dsw-alias-border-l2);border-radius:999px;color:var(--dsw-alias-label-secondary);font-size:10px;font-weight:650}.lg4l-subline{margin-top:2px;color:var(--dsw-alias-label-secondary);font-size:10px}
 .lg4l-top-actions{display:flex;align-items:center;gap:7px}.lg4l-icon-button{display:grid;place-items:center;width:32px;height:32px;padding:0;border:1px solid transparent;border-radius:8px;background:transparent;color:var(--dsw-alias-label-secondary);font:inherit;font-size:18px;cursor:pointer}.lg4l-icon-button:hover{border-color:var(--dsw-alias-border-l1);background:var(--dsw-alias-bg-layer-2);color:var(--dsw-alias-label-primary)}
 .lg4l-tabs{display:flex;align-items:end;gap:2px;padding:0 12px;border-bottom:1px solid var(--dsw-alias-border-l2);background:var(--dsw-alias-bg-layer-1);overflow-x:auto}.lg4l-tab{position:relative;display:flex;align-items:center;gap:7px;min-height:46px;padding:0 13px;border:0;background:transparent;color:var(--dsw-alias-label-secondary);font:inherit;font-size:12px;font-weight:650;white-space:nowrap;cursor:pointer}.lg4l-tab:hover{color:var(--dsw-alias-label-primary)}.lg4l-tab[aria-selected="true"]{color:var(--dsw-alias-label-primary)}.lg4l-tab[aria-selected="true"]:after{content:"";position:absolute;left:9px;right:9px;bottom:-1px;height:2px;border-radius:2px;background:var(--dsw-alias-brand-primary)}.lg4l-count{min-width:18px;padding:1px 5px;border-radius:999px;background:var(--dsw-alias-bg-layer-2);text-align:center;font-size:10px}
 .lg4l-content{min-height:0;overflow:auto;padding:16px;background:var(--dsw-alias-bg-base)}.lg4l-loading,.lg4l-empty{display:grid;place-items:center;align-content:center;gap:10px;min-height:260px;padding:30px;text-align:center;color:var(--dsw-alias-label-secondary)}.lg4l-empty strong{color:var(--dsw-alias-label-primary);font-size:16px}.lg4l-empty p{max-width:560px;margin:0;font-size:12px;line-height:1.6}.lg4l-spinner{width:24px;height:24px;border:2px solid var(--dsw-alias-border-l2);border-top-color:var(--dsw-alias-brand-primary);border-radius:50%;animation:lg4l-spin .8s linear infinite}@keyframes lg4l-spin{to{transform:rotate(360deg)}}
@@ -118,8 +182,9 @@ const CSS = `
 .lg4l-toast{padding:8px 12px;border-top:1px solid var(--dsw-alias-border-l1);background:color-mix(in srgb,var(--dsw-alias-brand-primary) 8%,var(--dsw-alias-bg-layer-1));color:var(--dsw-alias-label-primary);font-size:10px}.lg4l-footer{display:flex;align-items:center;justify-content:space-between;gap:12px;padding:8px 14px;border-top:1px solid var(--dsw-alias-border-l1);background:var(--dsw-alias-bg-layer-1);color:var(--dsw-alias-label-secondary);font-size:9px}.lg4l-footer code{font-family:ui-monospace,SFMono-Regular,Consolas,monospace}
 .lg4l-confirm-backdrop{position:absolute;inset:0;z-index:3;display:grid;place-items:center;padding:20px;background:color-mix(in srgb,var(--dsw-alias-bg-base) 72%,transparent);backdrop-filter:blur(4px)}.lg4l-confirm{width:min(440px,100%);padding:17px;border:1px solid var(--dsw-alias-border-l2);border-radius:12px;background:var(--dsw-alias-bg-overlay);box-shadow:0 18px 50px color-mix(in srgb,var(--dsw-alias-label-primary) 22%,transparent)}.lg4l-confirm h2{margin:0 0 8px;font-size:15px}.lg4l-confirm p{margin:0;color:var(--dsw-alias-label-secondary);font-size:11px;line-height:1.6}.lg4l-confirm code{color:var(--dsw-alias-label-primary);font-family:ui-monospace,SFMono-Regular,Consolas,monospace}.lg4l-confirm-actions{display:flex;justify-content:flex-end;gap:8px;margin-top:16px}
 .lg4l-issue-meta{display:flex;flex-wrap:wrap;gap:8px;margin:5px 0 8px;color:var(--dsw-alias-label-secondary);font-size:9px}.lg4l-issue-meta code{min-width:0;font-family:ui-monospace,SFMono-Regular,Consolas,monospace;overflow-wrap:anywhere}.lg4l-issue-comments{display:grid;gap:6px;margin-top:10px;padding-top:10px;border-top:1px solid var(--dsw-alias-border-l1)}.lg4l-issue-comment{display:grid;grid-template-columns:minmax(90px,150px) minmax(0,1fr);gap:8px;padding:7px 9px;border-radius:7px;background:var(--dsw-alias-bg-layer-2);font-size:10px;line-height:1.45}.lg4l-issue-comment span{min-width:0;overflow-wrap:anywhere}.lg4l-scope-select{width:100%;max-width:none;margin-bottom:9px}.lg4l-repo-select:disabled{opacity:.62;cursor:not-allowed}.lg4l-comment-head strong{min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
-@media(max-width:760px){.lg4l-overlay{right:max(8px,env(safe-area-inset-right));bottom:max(8px,env(safe-area-inset-bottom))}.lg4l-panel{width:calc(100vw - 16px);height:calc(100vh - 82px);height:calc(100dvh - 82px - env(safe-area-inset-bottom));min-height:0;border-radius:13px}.lg4l-content{padding:11px}.lg4l-grid,.lg4l-discuss-grid{grid-template-columns:1fr}.lg4l-side-stack{grid-template-columns:repeat(2,minmax(0,1fr))}.lg4l-compose{position:static}.lg4l-file-row{grid-template-columns:minmax(120px,1fr) minmax(100px,1fr)}.lg4l-file-hash{display:none}.lg4l-commit{grid-template-columns:1fr}.lg4l-commit-actions{justify-content:flex-start}.lg4l-repo-line{font-size:12px}.lg4l-badge{display:none}.lg4l-icon-button{width:40px;height:40px}.lg4l-button{min-height:40px}.lg4l-mention{min-height:32px;padding-inline:10px}.lg4l-issue-comment{grid-template-columns:1fr}}
-@media(max-width:480px){.lg4l-owner,.lg4l-slash{display:none}.lg4l-repo-select{min-width:0;max-width:190px;font-size:12px}.lg4l-tab{padding:0 9px}.lg4l-toolbar{align-items:stretch;flex-direction:column}.lg4l-toolbar-left,.lg4l-toolbar-right{width:100%}.lg4l-select{min-width:0;width:100%}.lg4l-side-stack{grid-template-columns:1fr}.lg4l-footer span:first-child{display:none}}
+.lg4l-backup-layout{display:grid;grid-template-columns:minmax(0,1fr) 280px;gap:14px;align-items:start}.lg4l-backup-form{display:grid;gap:11px;padding:14px}.lg4l-field{display:grid;gap:5px;color:var(--dsw-alias-label-secondary);font-size:10px}.lg4l-input{box-sizing:border-box;width:100%;min-height:36px;padding:7px 10px;border:1px solid var(--dsw-alias-border-l2);border-radius:8px;background:var(--dsw-alias-bg-base);color:var(--dsw-alias-label-primary);font:11px/1.4 inherit}.lg4l-input[type="number"]{max-width:160px}.lg4l-roots{min-height:86px;resize:vertical}.lg4l-check{display:flex;align-items:flex-start;gap:8px;color:var(--dsw-alias-label-secondary);font-size:10px;line-height:1.5}.lg4l-check input{margin-top:2px;accent-color:var(--dsw-alias-brand-primary)}.lg4l-warning{padding:10px 11px;border:1px solid color-mix(in srgb,var(--dsw-alias-state-warn-primary) 42%,var(--dsw-alias-border-l1));border-radius:8px;background:color-mix(in srgb,var(--dsw-alias-state-warn-primary) 8%,var(--dsw-alias-bg-layer-1));color:var(--dsw-alias-label-secondary);font-size:10px;line-height:1.55}.lg4l-root-list{display:grid;gap:5px;max-height:260px;padding:6px;overflow:auto;border:1px solid var(--dsw-alias-border-l1);border-radius:8px;background:var(--dsw-alias-bg-base)}.lg4l-root-row{display:flex;align-items:center;gap:5px;min-width:0}.lg4l-root-choice{min-width:0;max-width:100%;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}.lg4l-root-expand{flex:0 0 auto;padding:4px 6px;border:0;background:transparent;color:var(--dsw-alias-brand-primary);font:inherit;font-size:9px;cursor:pointer}.lg4l-root-expand:disabled{color:var(--dsw-alias-label-secondary);cursor:not-allowed}.lg4l-backup-actions{display:flex;flex-wrap:wrap;gap:8px}.lg4l-backup-files{max-height:330px;overflow:auto}.lg4l-backup-preview{margin-top:10px}.lg4l-backup-preview pre{max-height:300px;margin:0;padding:13px;overflow:auto;background:var(--dsw-alias-bg-layer-2);font:10px/1.55 ui-monospace,SFMono-Regular,Consolas,monospace;white-space:pre-wrap;overflow-wrap:anywhere}.lg4l-status-dot{display:inline-block;width:7px;height:7px;margin-right:6px;border-radius:50%;background:var(--dsw-alias-label-secondary)}.lg4l-status-dot[data-active="true"]{background:var(--dsw-alias-state-success-primary)}
+@media(max-width:760px){.lg4l-overlay{right:max(8px,env(safe-area-inset-right));bottom:max(8px,env(safe-area-inset-bottom))}.lg4l-panel{width:calc(100vw - 16px);height:calc(100vh - 82px);height:calc(100dvh - 82px - env(safe-area-inset-bottom));min-height:0;border-radius:13px}.lg4l-content{padding:11px}.lg4l-grid,.lg4l-discuss-grid,.lg4l-backup-layout{grid-template-columns:1fr}.lg4l-side-stack{grid-template-columns:repeat(2,minmax(0,1fr))}.lg4l-compose{position:static}.lg4l-file-row{grid-template-columns:minmax(120px,1fr) minmax(100px,1fr)}.lg4l-file-hash{display:none}.lg4l-commit{grid-template-columns:1fr}.lg4l-commit-actions{justify-content:flex-start}.lg4l-repo-line{font-size:12px}.lg4l-badge{display:none}.lg4l-icon-button{width:40px;height:40px}.lg4l-button{min-height:40px}.lg4l-mention{min-height:32px;padding-inline:10px}.lg4l-issue-comment{grid-template-columns:1fr}}
+@media(max-width:480px){.lg4l-owner,.lg4l-slash{display:none}.lg4l-repo-picker{min-width:0;max-width:190px}.lg4l-repo-select{font-size:12px}.lg4l-tab{padding:0 9px}.lg4l-toolbar{align-items:stretch;flex-direction:column}.lg4l-toolbar-left,.lg4l-toolbar-right{width:100%}.lg4l-select{min-width:0;width:100%}.lg4l-side-stack{grid-template-columns:1fr}.lg4l-footer span:first-child{display:none}}
 `
 
 function installStyles(): () => void {
@@ -215,11 +280,18 @@ function LocalGitFab(props: PanelProps) {
   const workspaceId = activeWorkspace === undefined ? undefined : String(activeWorkspace.workspaceId)
   const workspaceIdRef = useRef(workspaceId)
   const stateRequestIdRef = useRef(0)
+  const backupHistoryRequestIdRef = useRef(0)
+  const backupCheckoutRequestIdRef = useRef(0)
+  const backupCandidatesRequestIdRef = useRef(0)
+  const backupPreviewRequestIdRef = useRef(0)
   const mutationIdRef = useRef(0)
+  const activationQueueRef = useRef<Promise<void>>(Promise.resolve())
+  const selectedWorkspaceIntentRef = useRef<string | null>(selectedWorkspaceId)
   const panelWasOpenRef = useRef(false)
   workspaceIdRef.current = workspaceId
 
   const [open, setOpen] = useState(false)
+  const [repositoryMenuOpen, setRepositoryMenuOpen] = useState(false)
   const [tab, setTab] = useState<TabId>('code')
   const [selector, setSelector] = useState('HEAD')
   const [board, setBoard] = useState<BoardData | null>(null)
@@ -230,29 +302,62 @@ function LocalGitFab(props: PanelProps) {
   const [commentBody, setCommentBody] = useState('')
   const [commentIssueId, setCommentIssueId] = useState<string | null>(null)
   const [mentions, setMentions] = useState<string[]>([])
-  const [action, setAction] = useState<'initialize' | 'comment' | 'rollback' | null>(null)
+  const [action, setAction] = useState<'initialize' | 'comment' | 'rollback' | 'backup-enable' | 'backup-disable' | 'backup-capture' | 'backup-export' | null>(null)
   const [toast, setToast] = useState<string | null>(null)
   const [rollbackTarget, setRollbackTarget] = useState<BoundRollbackTarget | null>(null)
+  const [backupCandidates, setBackupCandidates] = useState<FileBackupRootCandidate[]>([])
+  const [backupRootIds, setBackupRootIds] = useState<string[]>([])
+  const [backupExpandedRootIds, setBackupExpandedRootIds] = useState<string[]>([])
+  const [backupCandidateLoadingId, setBackupCandidateLoadingId] = useState<string | null>(null)
+  const [backupInterval, setBackupInterval] = useState(15)
+  const [backupConfirmed, setBackupConfirmed] = useState(false)
+  const [backupHistory, setBackupHistory] = useState<FileBackupSnapshotSummary[]>([])
+  const [backupSnapshotId, setBackupSnapshotId] = useState<string | null>(null)
+  const [backupCheckout, setBackupCheckout] = useState<FileBackupCheckout | null>(null)
+  const [backupSelectedPath, setBackupSelectedPath] = useState<string | null>(null)
+  const [backupPreview, setBackupPreview] = useState<FileBackupPreview | null>(null)
+  const [backupLoading, setBackupLoading] = useState(false)
 
   useEffect(() => {
     if (selectedWorkspaceId !== null && workspaces.length > 0 && !workspaces.some(workspace => String(workspace.workspaceId) === selectedWorkspaceId)) {
       setSelectedWorkspaceId(null)
+      selectedWorkspaceIntentRef.current = null
       storeWorkspaceId(null)
     }
   }, [workspaces, selectedWorkspaceId])
 
   useEffect(() => {
     setSelector('HEAD')
+    setRepositoryMenuOpen(false)
     setBoard(null)
     setSelectedKey(null)
     setMentions([])
     setCommentBody('')
     setCommentIssueId(null)
     setRollbackTarget(null)
+    setBackupCandidates([])
+    setBackupRootIds([])
+    setBackupExpandedRootIds([])
+    setBackupCandidateLoadingId(null)
+    setBackupInterval(15)
+    setBackupConfirmed(false)
+    setBackupHistory([])
+    setBackupSnapshotId(null)
+    setBackupCheckout(null)
+    setBackupSelectedPath(null)
+    setBackupPreview(null)
+    setBackupLoading(false)
     setTab('code')
     setToast(null)
     setError(null)
   }, [workspaceId])
+
+  useEffect(() => {
+    const config = board?.backup.config
+    if (config === undefined) return
+    setBackupInterval(config.intervalMinutes)
+    setBackupConfirmed(false)
+  }, [workspaceId, board?.backup.config?.id])
 
   useEffect(() => {
     if (!open || workspaceId === undefined) return
@@ -283,6 +388,111 @@ function LocalGitFab(props: PanelProps) {
       if (requestId === stateRequestIdRef.current) stateRequestIdRef.current += 1
     }
   }, [open, workspaceId, selector, refreshTick])
+
+  useEffect(() => {
+    if (!open || tab !== 'backup' || workspaceId === undefined || !board?.initialized) {
+      setBackupCandidates([])
+      setBackupRootIds([])
+      setBackupExpandedRootIds([])
+      setBackupCandidateLoadingId(null)
+      return
+    }
+    const controller = new AbortController()
+    const requestId = ++backupCandidatesRequestIdRef.current
+    const requestWorkspaceId = workspaceId
+    apiRequest<{ candidates: FileBackupRootCandidate[] }>(`/backup/candidates?workspaceId=${encodeURIComponent(workspaceId)}`, { signal: controller.signal })
+      .then((value) => {
+        if (requestId !== backupCandidatesRequestIdRef.current || workspaceIdRef.current !== requestWorkspaceId) return
+        setBackupCandidates(value.candidates)
+        setBackupRootIds(current => {
+          const valid = current.filter(id => value.candidates.some(candidate => candidate.id === id))
+          return valid.length > 0 ? valid : value.candidates.filter(candidate => candidate.selected).map(candidate => candidate.id)
+        })
+      })
+      .catch((reason: unknown) => {
+        if (reason instanceof DOMException && reason.name === 'AbortError') return
+        if (requestId !== backupCandidatesRequestIdRef.current || workspaceIdRef.current !== requestWorkspaceId) return
+        setError(reason instanceof Error ? reason.message : '无法列出可备份的工作区条目。')
+      })
+    return () => controller.abort()
+  }, [open, tab, workspaceId, board?.initialized, board?.backup.config?.id])
+
+  useEffect(() => {
+    if (!open || tab !== 'backup' || workspaceId === undefined || (board?.backup.snapshots ?? 0) === 0) {
+      setBackupHistory([])
+      setBackupSnapshotId(null)
+      setBackupCheckout(null)
+      setBackupSelectedPath(null)
+      setBackupPreview(null)
+      return
+    }
+    const controller = new AbortController()
+    const requestId = ++backupHistoryRequestIdRef.current
+    const requestWorkspaceId = workspaceId
+    setBackupLoading(true)
+    apiRequest<{ snapshots: FileBackupSnapshotSummary[] }>(`/backup/history?workspaceId=${encodeURIComponent(workspaceId)}`, { signal: controller.signal })
+      .then((value) => {
+        if (requestId !== backupHistoryRequestIdRef.current || workspaceIdRef.current !== requestWorkspaceId) return
+        setBackupHistory(value.snapshots)
+        setBackupSnapshotId(current => current !== null && value.snapshots.some(snapshot => snapshot.id === current)
+          ? current : value.snapshots[0]?.id ?? null)
+      })
+      .catch((reason: unknown) => {
+        if (reason instanceof DOMException && reason.name === 'AbortError') return
+        if (requestId !== backupHistoryRequestIdRef.current || workspaceIdRef.current !== requestWorkspaceId) return
+        setError(reason instanceof Error ? reason.message : '无法读取文件备份历史。')
+      })
+      .finally(() => {
+        if (!controller.signal.aborted && requestId === backupHistoryRequestIdRef.current) setBackupLoading(false)
+      })
+    return () => controller.abort()
+  }, [open, tab, workspaceId, board?.backup.snapshots, refreshTick])
+
+  useEffect(() => {
+    if (!open || tab !== 'backup' || workspaceId === undefined || backupSnapshotId === null) return
+    const controller = new AbortController()
+    const requestId = ++backupCheckoutRequestIdRef.current
+    const requestWorkspaceId = workspaceId
+    setBackupLoading(true)
+    apiRequest<FileBackupCheckout>(`/backup/snapshot?workspaceId=${encodeURIComponent(workspaceId)}&snapshot=${encodeURIComponent(backupSnapshotId)}&limit=250`, { signal: controller.signal })
+      .then((value) => {
+        if (requestId !== backupCheckoutRequestIdRef.current || workspaceIdRef.current !== requestWorkspaceId) return
+        setBackupCheckout(value)
+        setBackupSelectedPath(current => current !== null && value.records.some(record => record.path === current)
+          ? current : value.records[0]?.path ?? null)
+      })
+      .catch((reason: unknown) => {
+        if (reason instanceof DOMException && reason.name === 'AbortError') return
+        if (requestId !== backupCheckoutRequestIdRef.current || workspaceIdRef.current !== requestWorkspaceId) return
+        setError(reason instanceof Error ? reason.message : '无法读取文件快照。')
+      })
+      .finally(() => {
+        if (!controller.signal.aborted && requestId === backupCheckoutRequestIdRef.current) setBackupLoading(false)
+      })
+    return () => controller.abort()
+  }, [open, tab, workspaceId, backupSnapshotId, refreshTick])
+
+  useEffect(() => {
+    if (!open || tab !== 'backup' || workspaceId === undefined || backupSnapshotId === null || backupSelectedPath === null) {
+      setBackupPreview(null)
+      return
+    }
+    const controller = new AbortController()
+    const requestId = ++backupPreviewRequestIdRef.current
+    const requestWorkspaceId = workspaceId
+    apiRequest<FileBackupPreview>(`/backup/preview?workspaceId=${encodeURIComponent(workspaceId)}&snapshot=${encodeURIComponent(backupSnapshotId)}&path=${encodeURIComponent(backupSelectedPath)}`, { signal: controller.signal })
+      .then((value) => {
+        if (requestId !== backupPreviewRequestIdRef.current || workspaceIdRef.current !== requestWorkspaceId) return
+        setBackupPreview(value)
+      })
+      .catch((reason: unknown) => {
+        if (reason instanceof DOMException && reason.name === 'AbortError') return
+        if (requestId !== backupPreviewRequestIdRef.current || workspaceIdRef.current !== requestWorkspaceId) return
+        setBackupPreview(null)
+        setError(reason instanceof Error ? reason.message : '无法读取文件预览。')
+      })
+    return () => controller.abort()
+  }, [open, tab, workspaceId, backupSnapshotId, backupSelectedPath])
 
   useEffect(() => {
     if (!open || workspaceId === undefined) return
@@ -333,6 +543,7 @@ function LocalGitFab(props: PanelProps) {
   const refresh = () => setRefreshTick(value => value + 1)
   const selectWorkspace = (value: string) => {
     if (action !== null) return
+    setRepositoryMenuOpen(false)
     setSelector('HEAD')
     setBoard(null)
     setSelectedKey(null)
@@ -343,8 +554,26 @@ function LocalGitFab(props: PanelProps) {
     setError(null)
     setTab('code')
     setSelectedWorkspaceId(value)
+    selectedWorkspaceIntentRef.current = value
     storeWorkspaceId(value)
-    setToast(`已切换到“${workspaces.find(workspace => String(workspace.workspaceId) === value)?.title ?? '所选仓库'}”。`)
+    const title = workspaces.find(workspace => String(workspace.workspaceId) === value)?.title ?? '所选仓库'
+    if (currentSessionId === undefined || currentSessionId === null) {
+      setToast(`看板已切换到“${title}”；当前没有可激活的在线会话。`)
+      return
+    }
+    const sessionId = String(currentSessionId)
+    setToast(`正在将“${title}”设为当前会话仓库…`)
+    const activation = activationQueueRef.current
+      .catch(() => undefined)
+      .then(() => apiRequest('/activate', { method: 'POST', body: { workspaceId: value, sessionId } }))
+    activationQueueRef.current = activation.then(() => undefined, () => undefined)
+    void activation
+      .then(() => {
+        if (selectedWorkspaceIntentRef.current === value) setToast(`已切换并激活“${title}”；后续 repo_* 工具将使用此仓库。`)
+      })
+      .catch((reason: unknown) => {
+        if (selectedWorkspaceIntentRef.current === value) setError(reason instanceof Error ? reason.message : '面板仓库激活失败。')
+      })
   }
   const liveAgents = new Set((board?.liveAgents ?? []).map(agent => agent.id))
   const selectedRecord = board?.checkout?.records.find(record => record.key === selectedKey)
@@ -370,6 +599,160 @@ function LocalGitFab(props: PanelProps) {
       setError(reason instanceof Error ? reason.message : '初始化失败。')
     } finally {
       if (mutationIdRef.current === mutationId) setAction(null)
+    }
+  }
+
+  const loadBackupChildren = async (candidate: FileBackupRootCandidate) => {
+    if (workspaceId === undefined || candidate.kind !== 'directory' || backupCandidateLoadingId !== null) return
+    const requestWorkspaceId = workspaceId
+    setBackupCandidateLoadingId(candidate.id)
+    setError(null)
+    try {
+      const value = await apiRequest<{ candidates: FileBackupRootCandidate[] }>(`/backup/candidates?workspaceId=${encodeURIComponent(requestWorkspaceId)}&parentId=${encodeURIComponent(candidate.id)}`)
+      if (workspaceIdRef.current !== requestWorkspaceId) return
+      setBackupCandidates(current => {
+        const merged = new Map(current.map(item => [item.id, item]))
+        for (const item of value.candidates) merged.set(item.id, item)
+        return [...merged.values()].sort((left, right) => left.label.localeCompare(right.label))
+      })
+      setBackupRootIds(current => [...new Set([
+        ...current,
+        ...value.candidates.filter(item => item.selected).map(item => item.id),
+      ])])
+      setBackupExpandedRootIds(current => current.includes(candidate.id) ? current : [...current, candidate.id])
+    } catch (reason) {
+      if (workspaceIdRef.current !== requestWorkspaceId) return
+      setError(reason instanceof Error ? reason.message : '无法展开备份目录。')
+    } finally {
+      if (workspaceIdRef.current === requestWorkspaceId) setBackupCandidateLoadingId(null)
+    }
+  }
+
+  const enableBackup = async () => {
+    if (workspaceId === undefined || !backupConfirmed) return
+    if (backupRootIds.length === 0) {
+      setError('请至少勾选一个面板列出的工作区文件或目录。')
+      return
+    }
+    const requestWorkspaceId = workspaceId
+    const mutationId = ++mutationIdRef.current
+    setAction('backup-enable')
+    setError(null)
+    try {
+      const result = await apiRequest<{ created: boolean; snapshot: FileBackupSnapshotSummary | null; status: FileBackupView }>('/backup/enable', {
+        method: 'POST',
+        body: {
+          workspaceId: requestWorkspaceId,
+          rootIds: backupRootIds,
+          intervalMinutes: backupInterval,
+          confirmSensitiveRisk: true,
+        },
+      })
+      if (workspaceIdRef.current !== requestWorkspaceId || mutationIdRef.current !== mutationId) return
+      setBackupConfirmed(false)
+      setToast(result.created
+        ? `文件自动备份已启用，并创建初始快照 ${shortId(result.snapshot?.id)}。`
+        : '文件自动备份已启用；当前内容与已有快照一致。')
+      refresh()
+    } catch (reason) {
+      if (workspaceIdRef.current !== requestWorkspaceId || mutationIdRef.current !== mutationId) return
+      setError(reason instanceof Error ? reason.message : '文件自动备份启用失败。')
+      refresh()
+    } finally {
+      if (mutationIdRef.current === mutationId) setAction(null)
+    }
+  }
+
+  const disableBackup = async () => {
+    if (workspaceId === undefined) return
+    const requestWorkspaceId = workspaceId
+    const mutationId = ++mutationIdRef.current
+    setAction('backup-disable')
+    setError(null)
+    try {
+      await apiRequest('/backup/disable', { method: 'POST', body: { workspaceId: requestWorkspaceId } })
+      if (workspaceIdRef.current !== requestWorkspaceId || mutationIdRef.current !== mutationId) return
+      setToast('已关闭自动扫描；已有文件快照和恢复导出仍然保留。')
+      refresh()
+    } catch (reason) {
+      if (workspaceIdRef.current !== requestWorkspaceId || mutationIdRef.current !== mutationId) return
+      setError(reason instanceof Error ? reason.message : '关闭文件自动备份失败。')
+    } finally {
+      if (mutationIdRef.current === mutationId) setAction(null)
+    }
+  }
+
+  const captureBackup = async () => {
+    if (workspaceId === undefined) return
+    const requestWorkspaceId = workspaceId
+    const mutationId = ++mutationIdRef.current
+    setAction('backup-capture')
+    setError(null)
+    try {
+      const result = await apiRequest<{ created: boolean; snapshot: FileBackupSnapshotSummary | null }>('/backup/capture', {
+        method: 'POST',
+        body: { workspaceId: requestWorkspaceId },
+      })
+      if (workspaceIdRef.current !== requestWorkspaceId || mutationIdRef.current !== mutationId) return
+      setToast(result.created
+        ? `已创建文件快照 ${shortId(result.snapshot?.id)}，共 ${result.snapshot?.fileCount ?? 0} 个文件。`
+        : '文件内容没有变化，未追加重复快照。')
+      refresh()
+    } catch (reason) {
+      if (workspaceIdRef.current !== requestWorkspaceId || mutationIdRef.current !== mutationId) return
+      setError(reason instanceof Error ? reason.message : '立即文件备份失败。')
+    } finally {
+      if (mutationIdRef.current === mutationId) setAction(null)
+    }
+  }
+
+  const exportBackup = async () => {
+    if (workspaceId === undefined || backupSnapshotId === null) return
+    const requestWorkspaceId = workspaceId
+    const requestSnapshotId = backupSnapshotId
+    const mutationId = ++mutationIdRef.current
+    setAction('backup-export')
+    setError(null)
+    try {
+      const result = await apiRequest<{ relativePath: string }>('/backup/export', {
+        method: 'POST',
+        body: { workspaceId: requestWorkspaceId, snapshot: requestSnapshotId },
+      })
+      if (workspaceIdRef.current !== requestWorkspaceId || mutationIdRef.current !== mutationId) return
+      setToast(`历史文件已安全导出到 ${result.relativePath}；当前工作区文件未被覆盖。`)
+      refresh()
+    } catch (reason) {
+      if (workspaceIdRef.current !== requestWorkspaceId || mutationIdRef.current !== mutationId) return
+      setError(reason instanceof Error ? reason.message : '恢复导出失败。')
+    } finally {
+      if (mutationIdRef.current === mutationId) setAction(null)
+    }
+  }
+
+  const loadMoreBackupFiles = async () => {
+    if (workspaceId === undefined || backupSnapshotId === null || backupCheckout?.nextCursor === undefined) return
+    const requestWorkspaceId = workspaceId
+    const requestSnapshotId = backupSnapshotId
+    const requestCursor = backupCheckout.nextCursor
+    const requestId = ++backupCheckoutRequestIdRef.current
+    setBackupLoading(true)
+    setError(null)
+    try {
+      const page = await apiRequest<FileBackupCheckout>(`/backup/snapshot?workspaceId=${encodeURIComponent(requestWorkspaceId)}&snapshot=${encodeURIComponent(requestSnapshotId)}&limit=250&cursor=${encodeURIComponent(requestCursor)}`)
+      if (requestId !== backupCheckoutRequestIdRef.current || workspaceIdRef.current !== requestWorkspaceId) return
+      setBackupCheckout(current => current === null || current.snapshot.id !== page.snapshot.id
+        ? page
+        : {
+            snapshot: page.snapshot,
+            records: [...current.records, ...page.records],
+            ...(page.nextCursor === undefined ? {} : { nextCursor: page.nextCursor }),
+            truncated: page.truncated,
+          })
+    } catch (reason) {
+      if (requestId !== backupCheckoutRequestIdRef.current || workspaceIdRef.current !== requestWorkspaceId) return
+      setError(reason instanceof Error ? reason.message : '无法继续加载文件快照。')
+    } finally {
+      if (requestId === backupCheckoutRequestIdRef.current) setBackupLoading(false)
     }
   }
 
@@ -454,7 +837,17 @@ function LocalGitFab(props: PanelProps) {
       tabIndex: -1,
       'aria-label': 'local-git-4-llm 仓库管理面板',
     },
-    renderTopbar(workspaces, activeWorkspace, board, action !== null, selectWorkspace, () => setOpen(false), refresh),
+    renderTopbar(
+      workspaces,
+      activeWorkspace,
+      board,
+      action !== null,
+      repositoryMenuOpen,
+      setRepositoryMenuOpen,
+      selectWorkspace,
+      () => { setRepositoryMenuOpen(false); setOpen(false) },
+      refresh,
+    ),
     renderTabs(tab, setTab, board),
     createElement('main', { className: 'lg4l-content', role: 'tabpanel', id: `lg4l-panel-${tab}`, 'aria-labelledby': `lg4l-tab-${tab}`, tabIndex: 0 },
       error === null ? null : createElement('div', { className: 'lg4l-error', role: 'alert' },
@@ -469,9 +862,37 @@ function LocalGitFab(props: PanelProps) {
             ? renderUninitialized(action === 'initialize', initialize)
             : board === null
               ? renderLoading()
-              : tab === 'code'
-                ? renderCode(board, selector, setSelector, selectedKey, setSelectedKey, selectedRecord, loading)
-                : tab === 'history'
+              : tab === 'backup'
+                ? renderBackup(
+                    board,
+                    backupCandidates,
+                    backupRootIds,
+                    setBackupRootIds,
+                    backupExpandedRootIds,
+                    backupCandidateLoadingId,
+                    loadBackupChildren,
+                    backupInterval,
+                    setBackupInterval,
+                    backupConfirmed,
+                    setBackupConfirmed,
+                    backupHistory,
+                    backupSnapshotId,
+                    setBackupSnapshotId,
+                    backupCheckout,
+                    backupSelectedPath,
+                    setBackupSelectedPath,
+                    backupPreview,
+                    backupLoading,
+                    action,
+                    enableBackup,
+                    disableBackup,
+                    captureBackup,
+                    exportBackup,
+                    loadMoreBackupFiles,
+                  )
+                : tab === 'code'
+                  ? renderCode(board, selector, setSelector, selectedKey, setSelectedKey, selectedRecord, loading)
+                  : tab === 'history'
                   ? renderHistory(board, setSelector, setTab, requestRollback, mutationsDisabled)
                   : tab === 'issues'
                     ? renderIssues(board, sessionsById)
@@ -479,15 +900,18 @@ function LocalGitFab(props: PanelProps) {
     ),
     toast === null ? null : createElement('div', { className: 'lg4l-toast', role: 'status' }, toast),
     createElement('footer', { className: 'lg4l-footer' },
-      createElement('span', null, '手动选择仓库 · 显式提交 · 不自动同步'),
-      createElement('code', null, 'local-git-4-llm · 0.5.0'),
+      createElement('span', null, '手动选择仓库 · 显式知识提交 · 可选文件自动备份'),
+      createElement('code', null, 'local-git-4-llm · 0.6.0-preview'),
     ),
     rollbackTarget === null ? null : renderRollbackConfirm(rollbackTarget.value, action === 'rollback', () => setRollbackTarget(null), confirmRollback),
     ) : null,
     createElement('button', {
       className: 'lg4l-fab',
       type: 'button',
-      onClick: () => setOpen(value => !value),
+      onClick: () => {
+        setRepositoryMenuOpen(false)
+        setOpen(value => !value)
+      },
       'aria-expanded': open,
       'aria-label': open ? '关闭 local-git-4-llm 仓库面板' : '打开 local-git-4-llm 仓库面板',
       title: '打开本地知识仓库',
@@ -500,6 +924,8 @@ function renderTopbar(
   workspace: WorkspaceView | undefined,
   board: BoardData | null,
   selectionDisabled: boolean,
+  menuOpen: boolean,
+  setMenuOpen: (value: boolean) => void,
   selectWorkspace: (workspaceId: string) => void,
   close: () => void,
   refresh: () => void,
@@ -511,20 +937,50 @@ function renderTopbar(
         createElement('div', { className: 'lg4l-repo-line' },
           createElement('span', { className: 'lg4l-owner' }, '仓库'),
           createElement('span', { className: 'lg4l-slash' }, '/'),
-          createElement('select', {
-            className: 'lg4l-repo-select',
-            value: workspace === undefined ? '' : String(workspace.workspaceId),
-            onChange: (event: ChangeEvent<HTMLSelectElement>) => selectWorkspace(event.currentTarget.value),
-            disabled: workspaces.length === 0 || selectionDisabled,
-            'aria-label': '选择要查看的本地仓库',
-            title: '手动选择要浏览和管理的仓库',
+          createElement('div', {
+            className: 'lg4l-repo-picker',
+            onBlur: (event: ReactFocusEvent<HTMLDivElement>) => {
+              if (!event.currentTarget.contains(event.relatedTarget as Node | null)) setMenuOpen(false)
+            },
           },
-          workspace === undefined ? createElement('option', { value: '', disabled: workspaces.length > 0 }, workspaces.length > 0 ? '请选择仓库' : '未选择工作区') : null,
-          ...workspaces.map(item => createElement('option', { key: String(item.workspaceId), value: String(item.workspaceId) }, item.title || '未命名工作区')),
+            createElement('button', {
+              className: 'lg4l-repo-select',
+              type: 'button',
+              disabled: workspaces.length === 0 || selectionDisabled,
+              'aria-label': '选择要查看并为当前会话激活的本地仓库',
+              'aria-expanded': menuOpen,
+              'aria-haspopup': 'listbox',
+              'aria-controls': 'lg4l-repo-menu',
+              title: '手动选择要浏览和为当前会话激活的仓库',
+              onClick: () => setMenuOpen(!menuOpen),
+            },
+            createElement('span', { className: 'lg4l-repo-select-label' }, workspace?.title || (workspaces.length > 0 ? '请选择仓库' : '未选择工作区')),
+            createElement('span', { className: 'lg4l-repo-chevron', 'aria-hidden': true }, menuOpen ? '▴' : '▾'),
+            ),
+            !menuOpen ? null : createElement('div', { className: 'lg4l-repo-menu', id: 'lg4l-repo-menu', role: 'listbox', 'aria-label': '已注册仓库' },
+              ...workspaces.map(item => {
+                const id = String(item.workspaceId)
+                const selected = workspace !== undefined && String(workspace.workspaceId) === id
+                return createElement('button', {
+                  key: id,
+                  className: 'lg4l-repo-option',
+                  type: 'button',
+                  role: 'option',
+                  'aria-selected': selected,
+                  'data-selected': selected,
+                  onClick: () => selectWorkspace(id),
+                },
+                createElement('span', { 'aria-hidden': true }, selected ? '✓' : ''),
+                createElement('span', null, item.title || '未命名工作区'),
+                )
+              }),
+            ),
           ),
           createElement('span', { className: 'lg4l-badge' }, board?.initialized ? '已初始化' : '本地'),
         ),
-        createElement('div', { className: 'lg4l-subline' }, board?.initialized ? `手动选择 · HEAD ${shortId(board.status?.head)} · 完整性 ${board.status?.integrity ?? '未知'}` : '手动选择并浏览本地不可变知识仓库'),
+        createElement('div', { className: 'lg4l-subline' }, board?.initialized
+          ? `手动选择 · HEAD ${shortId(board.status?.head)} · 文件备份 ${board.backup.enabled ? board.backup.runtime.running ? '扫描中' : '已启用' : '未启用'}`
+          : '手动选择并浏览本地不可变知识仓库'),
       ),
     ),
     createElement('div', { className: 'lg4l-top-actions' },
@@ -536,7 +992,8 @@ function renderTopbar(
 
 function renderTabs(tab: TabId, setTab: (tab: TabId) => void, board: BoardData | null) {
   const tabs: { id: TabId; label: string; count?: number }[] = [
-    { id: 'code', label: '代码', count: board?.status?.knowledgeKeys },
+    { id: 'code', label: '逻辑知识', count: board?.status?.knowledgeKeys },
+    { id: 'backup', label: '文件备份', count: board?.backup.snapshots },
     { id: 'history', label: '提交历史', count: board?.status?.commits },
     { id: 'issues', label: '议题', count: board?.status?.issues },
     { id: 'discuss', label: '评论与 @', count: board?.comments?.length },
@@ -653,6 +1110,231 @@ function renderCode(
           ),
         ),
       ),
+    ),
+  )
+}
+
+function renderBackup(
+  board: BoardData,
+  candidates: readonly FileBackupRootCandidate[],
+  selectedRootIds: readonly string[],
+  setSelectedRootIds: (value: string[]) => void,
+  expandedRootIds: readonly string[],
+  candidateLoadingId: string | null,
+  loadChildren: (candidate: FileBackupRootCandidate) => void,
+  interval: number,
+  setInterval: (value: number) => void,
+  confirmed: boolean,
+  setConfirmed: (value: boolean) => void,
+  history: readonly FileBackupSnapshotSummary[],
+  snapshotId: string | null,
+  setSnapshotId: (value: string) => void,
+  checkout: FileBackupCheckout | null,
+  selectedPath: string | null,
+  setSelectedPath: (value: string) => void,
+  preview: FileBackupPreview | null,
+  loading: boolean,
+  action: 'initialize' | 'comment' | 'rollback' | 'backup-enable' | 'backup-disable' | 'backup-capture' | 'backup-export' | null,
+  enable: () => void,
+  disable: () => void,
+  capture: () => void,
+  exportSnapshot: () => void,
+  loadMore: () => void,
+) {
+  const backup = board.backup
+  const busy = action !== null || loading
+  const setup = createElement('section', { className: 'lg4l-card' },
+    createElement('div', { className: 'lg4l-card-title' },
+      createElement('span', null, backup.configured ? '备份范围与计划' : '开启文件自动备份'),
+      createElement('code', null, '显式启用'),
+    ),
+    createElement('div', { className: 'lg4l-backup-form' },
+      createElement('div', { className: 'lg4l-field' },
+        createElement('span', null, '选择工作区文件或目录（1–16 个；可展开目录）'),
+        candidates.length === 0
+          ? createElement('div', { className: 'lg4l-empty', style: { minHeight: 80 } }, createElement('p', null, '没有可安全选择的工作区条目。'))
+          : createElement('div', { className: 'lg4l-root-list', role: 'group', 'aria-label': '选择文件备份根' },
+              ...candidates.map(candidate => {
+                const selected = selectedRootIds.includes(candidate.id)
+                const expanded = expandedRootIds.includes(candidate.id)
+                const depth = candidate.label.split('/').length - 1
+                return createElement('div', { key: candidate.id, className: 'lg4l-root-row', style: { paddingLeft: Math.min(depth, 8) * 12 } },
+                  createElement('button', {
+                    className: 'lg4l-mention lg4l-root-choice',
+                    type: 'button',
+                    disabled: busy || !selected && selectedRootIds.length >= 16,
+                    'aria-pressed': selected,
+                    'data-selected': selected,
+                    onClick: () => {
+                      if (selected) {
+                        setSelectedRootIds(selectedRootIds.filter(id => id !== candidate.id))
+                        return
+                      }
+                      const conflicts = new Set(candidates
+                        .filter(other => rootsOverlap(candidate.label, other.label))
+                        .map(other => other.id))
+                      setSelectedRootIds([
+                        ...selectedRootIds.filter(id => !conflicts.has(id)),
+                        candidate.id,
+                      ])
+                    },
+                  }, selected ? '✓ ' : '', candidate.kind === 'directory' ? '目录 ' : '文件 ', candidate.label),
+                  candidate.kind !== 'directory' ? null : createElement('button', {
+                    className: 'lg4l-root-expand',
+                    type: 'button',
+                    disabled: busy || candidateLoadingId !== null || expanded,
+                    onClick: () => loadChildren(candidate),
+                    'aria-label': `展开目录 ${candidate.label}`,
+                  }, candidateLoadingId === candidate.id ? '加载中…' : expanded ? '已展开' : '展开'),
+                )
+              }),
+            ),
+      ),
+      createElement('label', { className: 'lg4l-field' },
+        createElement('span', null, '自动备份间隔（分钟，5–1440）'),
+        createElement('input', {
+          className: 'lg4l-input',
+          type: 'number',
+          min: 5,
+          max: 1440,
+          step: 1,
+          value: interval,
+          disabled: busy,
+          onChange: (event: ChangeEvent<HTMLInputElement>) => setInterval(Number(event.currentTarget.value)),
+        }),
+      ),
+      createElement('div', { className: 'lg4l-warning' },
+        '备份保存在本工作区的 .dsh-repo/backup，内容未加密且不会上传。首版不允许整仓扫描；你必须明确列出相对文件或目录。系统仍会固定排除 .dsh-repo、.git、node_modules、构建缓存及常见密钥文件，也不会自动读取聊天内容。',
+      ),
+      createElement('label', { className: 'lg4l-check' },
+        createElement('input', {
+          type: 'checkbox',
+          checked: confirmed,
+          disabled: busy,
+          onChange: (event: ChangeEvent<HTMLInputElement>) => setConfirmed(event.currentTarget.checked),
+        }),
+        createElement('span', null, '我确认所选文件可能包含敏感信息，并同意将其以本机未加密、内容寻址的形式保存。'),
+      ),
+      createElement('button', {
+        className: 'lg4l-button lg4l-button-primary',
+        type: 'button',
+        disabled: busy || !confirmed || interval < 5 || interval > 1440 || selectedRootIds.length === 0,
+        onClick: enable,
+      }, action === 'backup-enable' ? '正在扫描并建立快照…' : backup.configured ? '保存配置并立即扫描' : '启用并创建初始快照'),
+    ),
+  )
+
+  if (!backup.configured || backup.integrity === 'error') {
+    return createElement('div', { className: 'lg4l-backup-layout' },
+      setup,
+      createElement('aside', { className: 'lg4l-side-stack' },
+        createElement('section', { className: 'lg4l-card' },
+          createElement('div', { className: 'lg4l-card-title' }, '安全边界'),
+          createElement('dl', { className: 'lg4l-stat-list' },
+            ...stat('默认状态', '完全关闭'),
+            ...stat('对象校验', 'SHA-256'),
+            ...stat('单文件上限', '64 MiB'),
+            ...stat('单快照上限', '512 MiB'),
+            ...stat('恢复方式', '安全导出副本'),
+          ),
+        ),
+        backup.runtime.lastError === undefined ? null : createElement('section', { className: 'lg4l-card' },
+          createElement('div', { className: 'lg4l-card-title' }, '最近错误'),
+          createElement('div', { className: 'lg4l-warning' }, backup.runtime.lastError),
+        ),
+      ),
+    )
+  }
+
+  const records = checkout?.records ?? []
+  return createElement('div', { className: 'lg4l-backup-layout' },
+    createElement('div', null,
+      createElement('div', { className: 'lg4l-toolbar' },
+        createElement('div', { className: 'lg4l-toolbar-left' },
+          createElement('label', null,
+            createElement('span', { style: visuallyHidden }, '选择文件快照'),
+            createElement('select', {
+              className: 'lg4l-select',
+              value: snapshotId ?? '',
+              disabled: history.length === 0 || busy,
+              onChange: (event: ChangeEvent<HTMLSelectElement>) => setSnapshotId(event.currentTarget.value),
+            },
+            history.length === 0 ? createElement('option', { value: '' }, '尚无文件快照') : null,
+            ...history.map(snapshot => createElement('option', { key: snapshot.id, value: snapshot.id },
+              `${formatDate(snapshot.capturedAt)} · ${backupReasonLabel(snapshot.reason)} · ${snapshot.fileCount} 个文件`,
+            )),
+            ),
+          ),
+        ),
+        createElement('div', { className: 'lg4l-toolbar-right' },
+          createElement('button', { className: 'lg4l-button', type: 'button', disabled: busy || !backup.enabled, onClick: capture }, action === 'backup-capture' ? '备份中…' : '立即备份'),
+          createElement('button', { className: 'lg4l-button', type: 'button', disabled: busy || snapshotId === null, onClick: exportSnapshot }, action === 'backup-export' ? '导出中…' : '导出恢复副本'),
+        ),
+      ),
+      createElement('section', { className: 'lg4l-card' },
+        createElement('div', { className: 'lg4l-card-title' },
+          createElement('span', null, checkout === null ? '文件快照' : `${formatDate(checkout.snapshot.capturedAt)} 的文件`),
+          createElement('code', null, shortId(checkout?.snapshot.id)),
+        ),
+        loading && checkout === null
+          ? createElement('div', { className: 'lg4l-loading', style: { minHeight: 150 } }, createElement('span', { className: 'lg4l-spinner' }), '正在验证文件快照…')
+          : records.length === 0
+            ? createElement('div', { className: 'lg4l-empty', style: { minHeight: 150 } }, createElement('strong', null, '此快照没有可显示文件'))
+            : createElement('div', { className: 'lg4l-file-list lg4l-backup-files' },
+                ...records.map(record => createElement('button', {
+                  key: record.path,
+                  type: 'button',
+                  className: 'lg4l-file-row',
+                  'data-selected': selectedPath === record.path,
+                  onClick: () => setSelectedPath(record.path),
+                },
+                createElement('span', { className: 'lg4l-file-name' }, record.path),
+                createElement('span', { className: 'lg4l-file-preview' }, `${formatBytes(record.size)} · ${formatDate(new Date(record.mtimeMs).toISOString())}`),
+                createElement('span', { className: 'lg4l-file-hash' }, shortId(record.blob)),
+                )),
+              ),
+      ),
+      preview === null ? null : createElement('section', { className: 'lg4l-card lg4l-backup-preview' },
+        createElement('div', { className: 'lg4l-card-title' },
+          createElement('span', null, preview.path),
+          createElement('code', null, `${formatBytes(preview.size)} · ${shortId(preview.blob)}`),
+        ),
+        preview.encoding === 'utf8'
+          ? createElement('pre', null, preview.content)
+          : createElement('div', { className: 'lg4l-empty', style: { minHeight: 100 } },
+              createElement('strong', null, preview.encoding === 'binary' ? '二进制文件' : '文件过大'),
+              createElement('p', null, preview.encoding === 'binary' ? '内容已完整备份并通过哈希校验，但面板不直接渲染二进制字节。' : '超过 64 KiB 的文件不在面板中预览，可通过恢复导出取得完整内容。'),
+            ),
+      ),
+      checkout?.truncated ? createElement('div', { className: 'lg4l-backup-actions', style: { marginTop: 10 } },
+        createElement('button', { className: 'lg4l-button', type: 'button', disabled: loading, onClick: loadMore }, loading ? '加载中…' : `继续加载（已显示 ${records.length} 个）`),
+      ) : null,
+    ),
+    createElement('aside', { className: 'lg4l-side-stack' },
+      createElement('section', { className: 'lg4l-card' },
+        createElement('div', { className: 'lg4l-card-title' }, '自动备份状态'),
+        createElement('dl', { className: 'lg4l-stat-list' },
+          createElement('dt', null, '状态'), createElement('dd', null,
+            createElement('span', { className: 'lg4l-status-dot', 'data-active': backup.enabled, 'aria-hidden': true }),
+            backup.runtime.running ? '正在扫描' : backup.enabled ? '已启用' : '已关闭',
+          ),
+          ...stat('快照', backup.snapshots),
+          ...stat('范围', backup.config?.scope.kind === 'workspace' ? '整个工作区' : `${backup.config?.scope.roots.length ?? 0} 个根`),
+          ...stat('间隔', `${backup.config?.intervalMinutes ?? '—'} 分钟`),
+          ...stat('下次扫描', backup.nextCaptureAt ? formatDate(backup.nextCaptureAt) : '等待初始快照'),
+          ...stat('最新快照', shortId(backup.latest?.id)),
+          ...stat('最新大小', backup.latest ? formatBytes(backup.latest.totalBytes) : '—'),
+          ...stat('安全排除', backup.latest?.ignoredFiles ?? 0),
+        ),
+        createElement('div', { className: 'lg4l-backup-actions', style: { padding: '0 12px 12px' } },
+          backup.enabled ? createElement('button', { className: 'lg4l-button lg4l-button-danger', type: 'button', disabled: busy, onClick: disable }, action === 'backup-disable' ? '关闭中…' : '关闭自动备份') : null,
+        ),
+      ),
+      backup.runtime.lastError === undefined ? null : createElement('section', { className: 'lg4l-card' },
+        createElement('div', { className: 'lg4l-card-title' }, '最近自动备份错误'),
+        createElement('div', { className: 'lg4l-warning' }, backup.runtime.lastError),
+      ),
+      setup,
     ),
   )
 }
@@ -914,6 +1596,26 @@ function actorAvatar(actor: RepositoryComment['author']): string {
 function valuePreview(value: JsonValue): string {
   const rendered = typeof value === 'string' ? value : JSON.stringify(value)
   return rendered.length > 90 ? `${rendered.slice(0, 87)}…` : rendered
+}
+
+function backupReasonLabel(reason: FileBackupSnapshotSummary['reason']): string {
+  switch (reason) {
+    case 'initial': return '初始'
+    case 'scheduled': return '自动'
+    case 'manual': return '手动'
+    case 'pre-restore': return '恢复前保护'
+  }
+}
+
+function formatBytes(value: number): string {
+  if (value < 1024) return `${value} B`
+  if (value < 1024 * 1024) return `${(value / 1024).toFixed(1)} KiB`
+  if (value < 1024 * 1024 * 1024) return `${(value / 1024 / 1024).toFixed(1)} MiB`
+  return `${(value / 1024 / 1024 / 1024).toFixed(1)} GiB`
+}
+
+function rootsOverlap(left: string, right: string): boolean {
+  return left === right || left.startsWith(`${right}/`) || right.startsWith(`${left}/`)
 }
 
 function renderDeliveryStatus(comment: RepositoryComment): string {

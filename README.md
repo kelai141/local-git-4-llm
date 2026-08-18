@@ -1,165 +1,199 @@
 # local-git-4-llm
 
-`local-git-4-llm` is a DSH-native, workspace-scoped knowledge repository for
-collaboration across conversations. It is designed around GitHub-like concepts:
-append-only commits, issues, a repository board, audit history, backups, and
-safe restore operations.
+`local-git-4-llm` is a DSH-native, workspace-scoped repository for durable
+LLM collaboration and explicitly enabled local file backup. It combines an
+append-only logical knowledge history with immutable, content-addressed
+physical file snapshots—without silently scanning a workspace merely because
+the plugin is installed.
 
-> **Current phase: 0.5.0 / M3 preview.**
-> The injected hybrid package now provides explicit initialization and
-> key/value commits, immutable historical checkout, append-only audited
-> rollback, administrator/agent comments, agent-authored Issues, live
-> `@智能体` relay with a durable delivery outbox, and a Chinese GitHub-inspired
-> repository board with manual repository selection in `shell.overlay`. It
-> still never initializes automatically, scans source files, extracts session content,
-> repairs unknown corruption, or accepts a model/UI supplied filesystem path.
+> **Current phase: 0.6.0 / M4 backup preview.**
+> The hybrid package provides `/setrepo`, repository activation from the
+> Chinese management panel, explicit initialization and key/value commits,
+> immutable checkout and audited rollback, Issues/comments/agent relay, plus
+> opt-in scheduled file snapshots with history browsing, preview, and
+> export-only recovery.
 
-## Product direction
+## What the panel can do
 
-The complete design is maintained in
-[`local-git-4-llm-方案与汇报.md`](./local-git-4-llm-方案与汇报.md).
+The additive `shell.overlay` panel covers the complete normal workflow:
 
-| Milestone | Deliverable |
-| --- | --- |
-| M0 | Hybrid package scaffold, host/client injection, overlay mounting, build and unload checks |
-| M1a | Checksum-validated journal reader, immutable commit/tree replay, bounded explicit `key/value` queries, and read-only issue projections |
-| M1b-init | Explicit idempotent `repo_init` with same-workspace staging and reader verification |
-| M1b | Explicit bounded key/value writes, complete immutable tree snapshots, writer locking, historical checkout, append-only rollback, and agent-authored issue opening (implemented); adoption remains |
-| M2 | Persisted admin/agent comments, issue-scoped discussion, durable delivery requests, and immediate relay to explicitly mentioned live agents (preview); offline retry remains |
-| M3 | Chinese GitHub-inspired code/history/issues/discussion board with theme tokens, manual repository selection, and rollback controls (preview) |
-| M4 | Concurrency, recovery, rollback and release hardening |
+- select a registered repository and activate it for the current live session;
+- initialize its logical `.dsh-repo` repository explicitly;
+- browse logical keys, commit history, Issues, and discussion;
+- roll back logical history by appending an audited restore commit;
+- choose 1–16 safe files/directories through an expandable workspace picker;
+- choose a 5–1440 minute schedule, acknowledge the local plaintext risk, and
+  enable/disable automatic backup;
+- create a snapshot immediately;
+- browse every snapshot and page through its file list;
+- preview bounded UTF-8 text while treating binary/large files safely;
+- export any historical snapshot to a new recovery directory without
+  overwriting the current workspace.
 
-## Current architecture
+`/setrepo` is a keyboard-friendly companion, not a requirement for using the
+feature.
+
+## `/setrepo`
+
+The human command is registered as `setrepo` (entered with the DSH `/` prefix):
 
 ```text
-src/
-  core/canonical.ts      deterministic JSON and SHA-256 addressing
-  core/repository.ts     strict read-only manifest/journal reader and replay
-  core/initializer.ts    explicit, staged, non-overwriting repository initialization
-  core/writer.ts         exclusive writer lock, commit/issue/comment append, verification, rollback
-  core/types.ts          repository, tree, commit, issue, and DTO types
-  core/manifest.ts       immutable package facts
-  api/admin.ts           capability-gated same-origin board API; workspace ids only
-  relay/comments.ts      persist-first admin/agent comment outbox and live relay
-  relay/lifecycle.ts     host lifecycle owned by the Cordis fiber
-  tools/initialize.ts    current-workspace explicit repo_init tool
-  tools/commit.ts        explicit bounded key/value repo_commit tool
-  tools/rollback.ts      append-only audited repo_rollback tool
-  tools/read-only.ts     current-workspace repo_status/log/diff/pull/issue readers
-  tools/discussion.ts    repo_collaborators/comment/issue_open/issue_comment tools
-  client/index.ts        additive GitHub-inspired repository management board
-  index.ts               host entry point
+/setrepo
+/setrepo <序号|workspaceId|精确标题>
+/setrepo current
+/setrepo reset
+/setrepo backup status
+/setrepo backup now
+/setrepo backup off
+/setrepo backup on <相对路径1,相对路径2> --confirm [--interval=15]
 ```
 
-The client surface uses `shell.overlay` with a fresh slot id and the official
-Harness `FishLogo`. Its foreground, surfaces, borders, state colors, and focus
-styles use DSH theme aliases, so the board follows light/dark theme changes.
-The responsive panel exposes Chinese tabs for logical code snapshots, commit
-history, issues, and administrator/agent comments. A repository selector lists
-registered workspaces and remembers the user's explicit choice; changing it
-does not synchronize or copy repository contents. It never replaces DSH's root,
-conversation, or sidebar UI.
+Selection is recorded as a durable session event. All `repo_*` tools first use
+that explicit selection, revalidate it through `workspaceRegistry`, and
+otherwise fall back to the calling session's registered `cwd`. The command uses
+`recordInput: false`; the authoritative selection/configuration event is stored
+separately.
 
-### Repository boundary
+## Two independent histories
 
-M1a reads only an already-existing repository at the calling session's
-registered workspace:
+Logical LLM knowledge and physical files deliberately do not share one journal:
 
 ```text
 <registered workspace>/
   .dsh-repo/
-    manifest.json      canonical repository identity, including workspaceId
-    journal.jsonl      LF-delimited canonical JSON event log
+    manifest.json                 logical repository identity
+    journal.jsonl                 logical commits/issues/comments/audit
+    backup/
+      journal.jsonl               file-backup config/snapshot/export audit
+      objects/sha256/ab/cdef...   raw blobs and canonical JSON objects
+      .staging/                    private unpublished work
+      exports/export_<uuid>/      recovery copies; never source overwrite
 ```
 
-`manifest.json` must bind to the current DSH `workspaceId`. The reader rejects
-symlinks/junctions (and verifies the opened file identity before reading),
-non-canonical JSON, bad UTF-8, broken sequence/previous-checksum links,
-unsupported events, invalid commit/tree hashes, oversized journals, and
-truncated tails. It reports the problem as structured tool data; it never
-attempts to repair or truncate data in M1a. `repo_log` exposes a public commit
-summary only, never the persistence-level author session/message identifiers.
+Both histories are append-only and checksum-verified. Backup blobs, manifests,
+configs, and snapshots use SHA-256 content IDs, so unchanged content is reused.
+If a new scan produces the same manifest as the latest snapshot, no duplicate
+snapshot event is appended.
 
-All model tools derive the workspace solely from the calling session. The
-management API accepts only a stable `workspaceId` and resolves it through
-`workspaceRegistry`; it never accepts a path. `repo_init` creates a complete
-canonical seed repository in a unique sibling staging directory, syncs the two
-files, and publishes it without deleting or adopting an existing destination.
-A valid existing repository returns idempotently; an invalid, foreign,
-symlinked, or junctioned destination is left untouched.
+## File backup behavior
 
-`repo_commit` applies at most 250 explicit `set`/`delete` mutations to bounded
-logical keys, writes a complete sorted tree snapshot, content-addresses the
-tree and commit, and appends one canonical journal record under an exclusive
-`write.lock`. The writer replays and verifies the result after fsync. It does
-not scan the workspace or read conversation messages. `repo_checkout` reads an
-immutable snapshot by `HEAD`, `ROOT`, or full SHA-256 id.
+File backup is **off by default**. Opening the backup tab may list safe entry
+names, and directories expand only after a human action; file contents are not read until
+the user confirms and enables backup. The scheduler tracks only repositories
+with a backup marker; it does not replay every registered repository once per
+minute.
 
-Rollback is deliberately not a history rewrite. `repo_rollback` and the board
-button append a `kind: rollback` commit whose `restores` field names the target
-snapshot. The prior HEAD and its full tree remain in the journal as the backup,
-so rollback itself is reversible and auditable. The UI requires an explicit
-confirmation but does not insert an additional DSH approval prompt.
+The first preview intentionally does not offer “scan the entire workspace.” A
+human must choose bounded roots. The panel sends opaque root IDs—not arbitrary
+source paths—to the management API. `/setrepo backup on` accepts bounded
+workspace-relative roots because it is itself a direct human command.
 
-Administrator and agent comments are persisted as checksum-linked journal
-events. They may target the repository timeline or one existing Issue. Agents
-explicitly create Issues with `repo_issue_open`, discover valid mention targets
-with `repo_collaborators`, and discuss through `repo_comment` or
-`repo_issue_comment`; no conversation text is harvested automatically. The
-board may use the same explicit `@` mechanism. Before any live relay, every
-explicit mention target is recorded in `comment.delivery.requested`;
-successful delivery is then audited with `comment.delivered`. Targets receive a `form: relay` user
-message through `agent.steer`, so the context enters the closest next step
-while normal tool permissions remain in force. Offline or failed targets remain
-visibly unconfirmed; automatic retry after resume is not implemented yet.
+Fixed exclusions include repository metadata and common generated or sensitive
+locations such as:
 
-Available tools: `repo_init`, `repo_commit`, `repo_checkout`, `repo_rollback`,
-`repo_status`, `repo_log`, `repo_diff`, `repo_pull`, `repo_issue_list`,
-`repo_issue_get`, `repo_collaborators`, `repo_comment`, `repo_issue_open`, and
+- `.dsh-repo`, `.git`, `.hg`, `.svn`;
+- `node_modules`, `dist`, `build`, `coverage`, caches and virtual environments;
+- `.ssh`, `.gnupg`, `.aws`, `.azure`, `.kube`, `.docker`;
+- `.env`/`.env.*`, package registry credentials, common SSH key names,
+  credential/secret filenames, and key/certificate extensions.
+
+These exclusions reduce accidents; they are not a universal secret detector.
+Snapshots are local and unencrypted, so the panel/command requires explicit
+risk confirmation. Nothing is uploaded remotely.
+
+### Consistency and limits
+
+The Node-only implementation performs deterministic sorted traversal,
+realpath containment checks, rejects symlinks/junctions/special files, verifies
+opened file identity, and compares a second source observation before
+publishing. This is best-effort **per-file validation on a cooperative local
+filesystem**, not a VSS/ZFS snapshot, a global atomic snapshot, or protection
+against a malicious process racing filesystem replacements.
+
+Current fail-closed limits:
+
+- 64 MiB per file;
+- 512 MiB and 10,000 files per snapshot;
+- 100 published snapshots;
+- 2 GiB object-store budget with a conservative one-snapshot reserve;
+- 16 explicit roots and depth 32;
+- no automatic pruning or guessed stale-lock deletion.
+
+## Restore model
+
+Logical rollback appends a new restore commit and preserves the previous HEAD.
+Physical restore v1 is safer and simpler: it materializes a new directory under
+`.dsh-repo/backup/exports/`. It never writes over source files. Once an export
+is published, a later audit-verification failure does not delete those
+user-visible recovery bytes; the operation reports the uncertain audit state.
+
+## Architecture
+
+```text
+src/
+  core/canonical.ts            deterministic JSON and SHA-256 addressing
+  core/repository.ts           strict logical manifest/journal reader
+  core/initializer.ts          explicit staged repository initialization
+  core/writer.ts               logical commits/issues/comments/rollback
+  core/backup.ts               physical snapshot objects, journal, export
+  core/workspace-selection.ts  durable /setrepo and shared resolver
+  commands/setrepo.ts          human repository/backup command
+  relay/backups.ts             enabled-only reconciliation scheduler
+  relay/comments.ts            persist-first comment relay/outbox
+  api/admin.ts                 capability-gated panel API; stable IDs/tokens
+  tools/*.ts                   repo_* model tools
+  client/index.ts              Chinese GitHub-inspired management panel
+```
+
+The panel uses a fresh additive `shell.overlay` slot ID. Colors use official
+DSH theme aliases, and the layout remains usable on narrow screens. It does not
+replace DSH root, conversation, or sidebar surfaces.
+
+## Model tools
+
+Available tools:
+
+`repo_init`, `repo_commit`, `repo_checkout`, `repo_rollback`, `repo_status`,
+`repo_log`, `repo_diff`, `repo_pull`, `repo_issue_list`, `repo_issue_get`,
+`repo_collaborators`, `repo_comment`, `repo_issue_open`, and
 `repo_issue_comment`.
+
+The model cannot enable physical file backup or supply source paths through
+these tools. Backup activation remains a direct human panel/command action.
+Conversation content is never automatically extracted into either history.
 
 ## Development
 
-The package uses peer dependencies from the running DSH installation. Install
-only its local build tools, then use the injector pipeline:
+The package uses peer dependencies from the running DSH installation:
 
 ```bash
 npm install --legacy-peer-deps --ignore-scripts
-# In a DSH session with dsh-super-injector:
-dev_build_plugin {"dir":"D:/coding/local-git-4-llm"}
-dev_inject_plugin {"dir":"D:/coding/local-git-4-llm"}
 npm run typecheck
 npm run test:repository
+
+# In a DSH session with dsh-super-injector:
+dev_build_plugin {"dir":"D:/coding/local-git-4-llm"}
+dev_reload_package {"packageName":"local-git-4-llm"}
 ```
 
-`scripts/build.sh` links the installed DSH runtime declarations into the
-ignored local `node_modules/` directory before compiling host TypeScript. When
-the injector reaches Bash through WSL on Windows, it uses `node.exe` to create
-Windows junctions, so `dev_build_plugin` and native `npm run typecheck` share
-the same declarations. Set `DSH_RUNTIME_NODE_MODULES` only when the runtime
-cannot be found via `npm root -g`.
+`scripts/build.sh` links runtime declarations, compiles the Host, and the
+injector also runs the client `tsdown` build. WSL may print a harmless
+localhost/NAT diagnostic on Windows before a successful host compilation.
 
-## Safety defaults
+## Safety summary
 
-- Adoption remains explicit. M1b-init creates repository data only after an
-  explicit `repo_init` call for the current registered workspace.
-- Knowledge writes receive only explicit `key/value` changes; automatic source
-  scanning and conversation extraction remain out of scope.
-- Rollback preserves the old HEAD as its immutable backup and records the
-  restored commit id in the new audit commit.
-- The board API uses a per-run same-origin capability and JSON-only writes.
-  Comment mentions and rollback targets are resolved inside one registered
-  workspace.
-- Agent discussion tools bind the recorded author to the calling session and
-  reject calls when that session is not a member of the workspace resolved by
-  `workspaceRegistry.resolveByPath()`.
-- The panel changes repositories only after manual selection (with a current or
-  remembered repository used solely as the initial default); it does not add an
-  automatic repository synchronization path.
-- Writer locks fail closed. A stale lock is not guessed away automatically;
-  crash recovery and lock self-heal remain M4 work.
-- Offline mention retry/reconciliation, deduplication, and cooldown controls
-  remain the next M2 increment.
+- Installation/reload does not initialize a repository or scan source files.
+- Repository initialization, logical mutation, backup activation, snapshot
+  export, and rollback are explicit and auditable.
+- The management API resolves stable workspace/session IDs and opaque backup
+  root tokens; it never accepts an absolute workspace path.
+- Writer and capture locks fail closed. Stale locks are preserved for manual
+  diagnosis rather than guessed away.
+- No remote upload, automatic pruning, in-place physical restore, corruption
+  repair, or conversation harvesting is performed.
+
+The longer design/progress record is in
+[`local-git-4-llm-方案与汇报.md`](./local-git-4-llm-方案与汇报.md).
 
 ## License
 

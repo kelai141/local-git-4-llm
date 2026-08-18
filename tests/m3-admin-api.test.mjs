@@ -1,11 +1,12 @@
 import assert from 'node:assert/strict'
-import { mkdtemp, rm, writeFile } from 'node:fs/promises'
+import { mkdtemp, mkdir, rm, writeFile } from 'node:fs/promises'
 import { createServer } from 'node:http'
 import { tmpdir } from 'node:os'
 import path from 'node:path'
 import test from 'node:test'
 
 import { installAdminApi } from '../lib/api/admin.js'
+import { FileBackupRepository } from '../lib/core/backup.js'
 import { RepositoryReader } from '../lib/core/repository.js'
 import { RepositoryWriter } from '../lib/core/writer.js'
 
@@ -19,10 +20,18 @@ test('management API resolves registered workspaces and drives board, rollback, 
     path: workspacePath,
     sessionIds: ['session-live', 'session-offline'],
   }
+  await writeFile(path.join(workspacePath, 'README.md'), '# admin backup\n', 'utf8')
+  await mkdir(path.join(workspacePath, 'src', 'nested'), { recursive: true })
+  await writeFile(path.join(workspacePath, 'src', 'nested', 'data.txt'), 'nested backup\n', 'utf8')
   const relays = []
+  const sessionEvents = []
   let createAuditLock = false
   const liveAgent = {
     status: 'idle',
+    session: {
+      events: sessionEvents,
+      append(type, data) { sessionEvents.push({ type, data }) },
+    },
     async steer(message) {
       relays.push(message)
       if (createAuditLock) {
@@ -53,7 +62,16 @@ test('management API resolves registered workspaces and drives board, rollback, 
     },
   }
 
-  installAdminApi(ctx)
+  const backupScheduler = {
+    getRuntimeStatus() { return { running: false } },
+    clearFailure() {},
+    trackConfigured() {},
+    untrackDisabled() {},
+    async captureNow(target, reason, signal) {
+      return FileBackupRepository.capture(target.path, String(target.id), reason, signal)
+    },
+  }
+  installAdminApi(ctx, backupScheduler)
   assert.equal(route.kind, 'prefix')
   assert.equal(route.path, '/local-git-4-llm/api')
 
@@ -98,13 +116,79 @@ test('management API resolves registered workspaces and drives board, rollback, 
     sessionIds: workspace.sessionIds,
   })
   assert.deepEqual(initialState.liveAgents, [{ id: 'session-live', status: 'idle' }])
+  assert.deepEqual(initialState.backup, {
+    configured: false,
+    enabled: false,
+    integrity: 'ok',
+    journalEntries: 0,
+    snapshots: 0,
+    runtime: { running: false },
+  })
   assert.equal('path' in initialState.workspace, false)
+
+  const activation = await apiJson(`${root}/activate`, {
+    method: 'POST',
+    headers: { ...headers, 'content-type': 'application/json' },
+    body: JSON.stringify({ workspaceId: workspace.id, sessionId: 'session-live' }),
+  })
+  assert.equal(activation.workspaceId, workspace.id)
+  assert.deepEqual(sessionEvents.at(-1)?.data.workspaceId, workspace.id)
 
   await apiJson(`${root}/initialize`, {
     method: 'POST',
     headers: { ...headers, 'content-type': 'application/json' },
     body: JSON.stringify({ workspaceId: workspace.id }),
   })
+
+  const backupCandidates = await apiJson(`${root}/backup/candidates?workspaceId=${workspace.id}`, { headers })
+  const readmeCandidate = backupCandidates.candidates.find(candidate => candidate.label === 'README.md')
+  const srcCandidate = backupCandidates.candidates.find(candidate => candidate.label === 'src')
+  assert(readmeCandidate)
+  assert(srcCandidate)
+  assert.match(readmeCandidate.id, /^root_[a-f0-9]{64}$/u)
+  const srcChildren = await apiJson(`${root}/backup/candidates?workspaceId=${workspace.id}&parentId=${encodeURIComponent(srcCandidate.id)}`, { headers })
+  const nestedCandidate = srcChildren.candidates.find(candidate => candidate.label === 'src/nested')
+  assert(nestedCandidate)
+  const nestedChildren = await apiJson(`${root}/backup/candidates?workspaceId=${workspace.id}&parentId=${encodeURIComponent(nestedCandidate.id)}`, { headers })
+  assert.equal(nestedChildren.candidates[0].label, 'src/nested/data.txt')
+  const rejectedPathBody = await fetch(`${root}/backup/enable`, {
+    method: 'POST',
+    headers: { ...headers, 'content-type': 'application/json' },
+    body: JSON.stringify({
+      workspaceId: workspace.id,
+      scope: { kind: 'selected', roots: ['README.md'] },
+      confirmSensitiveRisk: true,
+    }),
+  })
+  assert.equal(rejectedPathBody.status, 400)
+  assert.equal((await rejectedPathBody.json()).error.code, 'INVALID_REQUEST')
+  const enabledBackup = await apiJson(`${root}/backup/enable`, {
+    method: 'POST',
+    headers: { ...headers, 'content-type': 'application/json' },
+    body: JSON.stringify({
+      workspaceId: workspace.id,
+      rootIds: [nestedCandidate.id],
+      intervalMinutes: 5,
+      confirmSensitiveRisk: true,
+    }),
+  })
+  assert.equal(enabledBackup.created, true)
+  assert.equal(enabledBackup.snapshot.fileCount, 1)
+  const configuredCandidates = await apiJson(`${root}/backup/candidates?workspaceId=${workspace.id}`, { headers })
+  assert.equal(configuredCandidates.candidates.find(candidate => candidate.label === 'src/nested')?.selected, true)
+  const backupHistory = await apiJson(`${root}/backup/history?workspaceId=${workspace.id}`, { headers })
+  assert.equal(backupHistory.snapshots.length, 1)
+  const backupSnapshot = await apiJson(`${root}/backup/snapshot?workspaceId=${workspace.id}&snapshot=LATEST&limit=100`, { headers })
+  assert.deepEqual(backupSnapshot.records.map(record => record.path), ['src/nested/data.txt'])
+  const backupPreview = await apiJson(`${root}/backup/preview?workspaceId=${workspace.id}&snapshot=LATEST&path=${encodeURIComponent('src/nested/data.txt')}`, { headers })
+  assert.equal(backupPreview.encoding, 'utf8')
+  assert.equal(backupPreview.content, 'nested backup\n')
+  const backupExport = await apiJson(`${root}/backup/export`, {
+    method: 'POST',
+    headers: { ...headers, 'content-type': 'application/json' },
+    body: JSON.stringify({ workspaceId: workspace.id, snapshot: enabledBackup.snapshot.id }),
+  })
+  assert.match(backupExport.relativePath, /^\.dsh-repo\/backup\/exports\/export_/u)
 
   const first = await RepositoryWriter.commit(workspacePath, workspace.id, {
     message: '第一版',
@@ -229,6 +313,8 @@ test('management API resolves registered workspaces and drives board, rollback, 
   assert.deepEqual(finalState.comments.find(comment => comment.id === commentResult.comment.id)?.deliveredTo, ['session-live'])
   assert.equal(finalState.issues[0].id, issue.id)
   assert.deepEqual(finalState.issues[0].openedBy, { kind: 'agent', sessionId: 'session-live' })
+  assert.equal(finalState.backup.enabled, true)
+  assert.equal(finalState.backup.snapshots, 1)
 
   const reader = await RepositoryReader.open(workspacePath, workspace.id)
   assert(reader)

@@ -1,7 +1,7 @@
 {
   "name": "@dsh-external/local-git-4-llm",
-  "version": "0.5.0",
-  "description": "A workspace-scoped, GitHub-style knowledge repository manager for DSH conversations.",
+  "version": "0.6.0",
+  "description": "A workspace-scoped DSH knowledge repository with explicit immutable local file backup.",
   "private": true,
   "type": "module",
   "main": "./lib/index.js",
@@ -19,6 +19,8 @@
   },
   "homepage": "https://github.com/kelai141/local-git-4-llm#readme",
   "peerDependencies": {
+    "@deepseek-ai/cordis-plugin-timer": ">=0.0.1-rc <2",
+    "@deepseek-ai/dsh-commands": ">=0.0.1-rc <2",
     "@deepseek-ai/dsh-client-runtime": ">=0.0.1-rc <2",
     "@deepseek-ai/dsh-client-ui-layout": ">=0.0.1-rc <2",
     "@deepseek-ai/dsh-client-ui-primitives": ">=0.0.1-rc <2",
@@ -48,7 +50,9 @@
     "test:m1b-commit": "npm run build && node --test tests/m1b-commit.test.mjs",
     "test:m3-admin-api": "npm run build && node --test tests/m3-admin-api.test.mjs",
     "test:m3-discussion": "npm run build && node --test tests/m3-discussion-tools.test.mjs",
-    "test:repository": "npm run build && node --test tests/m1a-reader.test.mjs tests/m1b-init.test.mjs tests/m1b-commit.test.mjs tests/m3-admin-api.test.mjs tests/m3-discussion-tools.test.mjs"
+    "test:m4-backup": "npm run build && node --test tests/m4-file-backup.test.mjs",
+    "test:m4-setrepo": "npm run build && node --test tests/m4-setrepo.test.mjs",
+    "test:repository": "npm run build && node --test tests/m1a-reader.test.mjs tests/m1b-init.test.mjs tests/m1b-commit.test.mjs tests/m3-admin-api.test.mjs tests/m3-discussion-tools.test.mjs tests/m4-file-backup.test.mjs tests/m4-setrepo.test.mjs"
   },
   "exports": {
     ".": {

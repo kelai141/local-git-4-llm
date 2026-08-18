@@ -1,13 +1,17 @@
 import type { Context } from 'cordis'
+import type { Agent } from '@deepseek-ai/dsh-agent'
 import type { JsonValue } from '@deepseek-ai/dsh-session'
 import { defineTool } from '@deepseek-ai/dsh-tools'
 import type {} from '@deepseek-ai/dsh-tools'
 import type {} from '@deepseek-ai/dsh-workspace'
 import { RepositoryReader, RepositoryReadError } from '../core/repository.js'
+import { WorkspaceSelectionError, resolveRepositoryWorkspace } from '../core/workspace-selection.js'
 
 type ToolErrorCode =
   | 'NO_CALLER_WORKSPACE'
   | 'WORKSPACE_UNREGISTERED'
+  | 'SELECTED_WORKSPACE_UNAVAILABLE'
+  | 'SELECTED_WORKSPACE_INVALID'
   | 'REPO_NOT_INITIALIZED'
   | 'REPO_PATH_ESCAPE'
   | 'REPO_FORMAT_UNSUPPORTED'
@@ -35,7 +39,7 @@ const OUTPUT = {
   render: (_args: unknown, value: JsonValue) => [{ type: 'text' as const, text: JSON.stringify(value, null, 2) }],
 }
 
-/** Register M1a readers. All tools derive their workspace from the calling session, never a model-supplied path. */
+/** Register readers over the durable /setrepo selection or caller workspace, never a model-supplied path. */
 export function installReadOnlyTools(ctx: Context): void {
   const definitions = [
     defineTool({
@@ -45,7 +49,7 @@ export function installReadOnlyTools(ctx: Context): void {
       output: OUTPUT,
       isConcurrencySafe: () => true,
       async execute(_args, exec) {
-        const current = await currentRepository(ctx, exec.agent?.session.header.cwd, exec.signal)
+        const current = await currentRepository(ctx, exec.agent, exec.signal)
         return asToolValue(current.error ?? success(await current.reader.status(exec.signal)))
       },
     }),
@@ -58,7 +62,7 @@ export function installReadOnlyTools(ctx: Context): void {
       output: OUTPUT,
       isConcurrencySafe: () => true,
       async execute(args, exec) {
-        const current = await currentRepository(ctx, exec.agent?.session.header.cwd, exec.signal)
+        const current = await currentRepository(ctx, exec.agent, exec.signal)
         return asToolValue(current.error ?? success({ commits: await current.reader.log(args.limit ?? 50, exec.signal) }))
       },
     }),
@@ -72,7 +76,7 @@ export function installReadOnlyTools(ctx: Context): void {
       output: OUTPUT,
       isConcurrencySafe: () => true,
       async execute(args, exec) {
-        const current = await currentRepository(ctx, exec.agent?.session.header.cwd, exec.signal)
+        const current = await currentRepository(ctx, exec.agent, exec.signal)
         return asToolValue(current.error ?? success({ diff: await current.reader.diff(args.from, args.to, exec.signal) }))
       },
     }),
@@ -85,7 +89,7 @@ export function installReadOnlyTools(ctx: Context): void {
       output: OUTPUT,
       isConcurrencySafe: () => true,
       async execute(args, exec) {
-        const current = await currentRepository(ctx, exec.agent?.session.header.cwd, exec.signal)
+        const current = await currentRepository(ctx, exec.agent, exec.signal)
         return asToolValue(current.error ?? success(await current.reader.checkout(args.selector ?? 'HEAD', exec.signal)))
       },
     }),
@@ -100,7 +104,7 @@ export function installReadOnlyTools(ctx: Context): void {
       output: OUTPUT,
       isConcurrencySafe: () => true,
       async execute(args, exec) {
-        const current = await currentRepository(ctx, exec.agent?.session.header.cwd, exec.signal)
+        const current = await currentRepository(ctx, exec.agent, exec.signal)
         return asToolValue(current.error ?? success(await current.reader.pull(args.keys, args.limit ?? 50, args.cursor, exec.signal)))
       },
     }),
@@ -113,7 +117,7 @@ export function installReadOnlyTools(ctx: Context): void {
       output: OUTPUT,
       isConcurrencySafe: () => true,
       async execute(args, exec) {
-        const current = await currentRepository(ctx, exec.agent?.session.header.cwd, exec.signal)
+        const current = await currentRepository(ctx, exec.agent, exec.signal)
         return asToolValue(current.error ?? success({ issues: await current.reader.listIssues(args.limit ?? 50, exec.signal) }))
       },
     }),
@@ -126,7 +130,7 @@ export function installReadOnlyTools(ctx: Context): void {
       output: OUTPUT,
       isConcurrencySafe: () => true,
       async execute(args, exec) {
-        const current = await currentRepository(ctx, exec.agent?.session.header.cwd, exec.signal)
+        const current = await currentRepository(ctx, exec.agent, exec.signal)
         return asToolValue(current.error ?? success({ issue: await current.reader.getIssue(args.id, exec.signal) ?? null }))
       },
     }),
@@ -137,20 +141,12 @@ export function installReadOnlyTools(ctx: Context): void {
   }
 }
 
-async function currentRepository(ctx: Context, cwd: string | undefined, signal: AbortSignal): Promise<
+async function currentRepository(ctx: Context, agent: Agent | undefined, signal: AbortSignal): Promise<
   | { readonly reader: RepositoryReader; readonly error?: never }
   | { readonly reader?: never; readonly error: ToolResult }
 > {
-  if (cwd === undefined) {
-    return { error: failure('NO_CALLER_WORKSPACE', '仓库工具需要来自拥有工作区的会话。') }
-  }
   try {
-    signal.throwIfAborted()
-    const workspace = await ctx.workspaceRegistry.resolveByPath(cwd)
-    signal.throwIfAborted()
-    if (workspace === undefined) {
-      return { error: failure('WORKSPACE_UNREGISTERED', '当前会话工作区尚未注册到 DSH。') }
-    }
+    const { workspace } = await resolveRepositoryWorkspace(ctx, agent, signal)
     const reader = await RepositoryReader.open(workspace.path, String(workspace.id), signal)
     if (reader === undefined) {
       return { error: failure('REPO_NOT_INITIALIZED', 'No explicit repository exists for the current workspace.') }
@@ -170,6 +166,7 @@ function failure(code: ToolErrorCode, message: string): ToolResult {
 }
 
 function readerFailure(error: unknown): ToolResult {
+  if (error instanceof WorkspaceSelectionError) return failure(error.code, error.message)
   if (error instanceof RepositoryReadError) return failure(error.code, error.message)
   if (error instanceof Error && error.name === 'AbortError') throw error
   return failure('REPO_READ_FAILED', 'Repository could not be read safely.')

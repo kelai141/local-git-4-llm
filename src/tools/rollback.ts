@@ -5,6 +5,7 @@ import type {} from '@deepseek-ai/dsh-tools'
 import type {} from '@deepseek-ai/dsh-workspace'
 import { RepositoryReadError } from '../core/repository.js'
 import { RepositoryWriteError, RepositoryWriter } from '../core/writer.js'
+import { WorkspaceSelectionError, resolveRepositoryWorkspace } from '../core/workspace-selection.js'
 
 type ToolResult =
   | { readonly ok: true; readonly data: JsonValue }
@@ -19,7 +20,7 @@ const OUTPUT = {
 export function installRepositoryRollbackTool(ctx: Context): void {
   const definition = defineTool({
     name: 'repo_rollback',
-    description: '将当前会话工作区回退到一个不可变提交快照。回退通过追加新 commit 完成，旧 HEAD 作为完整备份永久保留；不会截断历史。',
+    description: '将 /setrepo 激活仓库或当前会话仓库回退到一个不可变提交快照。回退通过追加新 commit 完成，旧 HEAD 作为完整备份永久保留；不会截断历史。',
     parameters: {
       target: { type: 'string', required: true, description: '目标选择器：ROOT、HEAD 或完整 SHA-256 commit id。' },
       message: { type: 'string', description: '可选回退说明；默认根据目标生成。' },
@@ -28,17 +29,11 @@ export function installRepositoryRollbackTool(ctx: Context): void {
     isConcurrencySafe: () => false,
     async execute(args, exec) {
       const agent = exec.agent
-      const cwd = agent?.session.header.cwd
-      if (agent === undefined || cwd === undefined) {
+      if (agent === undefined) {
         return asToolValue(failure('NO_CALLER_WORKSPACE', '回退需要来自拥有工作区的会话。'))
       }
       try {
-        exec.signal.throwIfAborted()
-        const workspace = await ctx.workspaceRegistry.resolveByPath(cwd)
-        exec.signal.throwIfAborted()
-        if (workspace === undefined) {
-          return asToolValue(failure('WORKSPACE_UNREGISTERED', '当前会话工作区尚未注册到 DSH。'))
-        }
+        const { workspace } = await resolveRepositoryWorkspace(ctx, agent, exec.signal)
         const result = await RepositoryWriter.rollback(workspace.path, String(workspace.id), {
           target: args.target,
           message: args.message ?? `回退到 ${args.target}`,
@@ -62,6 +57,7 @@ function failure(code: string, message: string): ToolResult {
 }
 
 function writeFailure(error: unknown): ToolResult {
+  if (error instanceof WorkspaceSelectionError) return failure(error.code, error.message)
   if (error instanceof RepositoryWriteError || error instanceof RepositoryReadError) return failure(error.code, error.message)
   if (typeof error === 'object' && error !== null && (error as { name?: unknown }).name === 'AbortError') throw error
   return failure('REPO_WRITE_FAILED', '仓库回退未能安全完成。')

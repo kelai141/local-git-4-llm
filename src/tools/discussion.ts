@@ -1,15 +1,19 @@
 import type { Context } from 'cordis'
+import type { Agent } from '@deepseek-ai/dsh-agent'
 import type { JsonValue } from '@deepseek-ai/dsh-session'
 import { defineTool } from '@deepseek-ai/dsh-tools'
 import type {} from '@deepseek-ai/dsh-tools'
 import type {} from '@deepseek-ai/dsh-workspace'
 import { RepositoryReadError } from '../core/repository.js'
 import { RepositoryWriteError, RepositoryWriter } from '../core/writer.js'
+import { WorkspaceSelectionError, resolveRepositoryWorkspace } from '../core/workspace-selection.js'
 import { persistAndRelayComment } from '../relay/comments.js'
 
 type DiscussionToolErrorCode =
   | 'NO_CALLER_WORKSPACE'
   | 'WORKSPACE_UNREGISTERED'
+  | 'SELECTED_WORKSPACE_UNAVAILABLE'
+  | 'SELECTED_WORKSPACE_INVALID'
   | 'CALLER_OUTSIDE_WORKSPACE'
   | 'REPO_NOT_INITIALIZED'
   | 'INVALID_MUTATION'
@@ -24,11 +28,6 @@ type DiscussionToolErrorCode =
 type ToolResult =
   | { readonly ok: true; readonly data: JsonValue }
   | { readonly ok: false; readonly error: { readonly code: DiscussionToolErrorCode; readonly message: string } }
-
-interface CallerAgent {
-  readonly id: unknown
-  readonly session: { readonly header: { readonly cwd?: string } }
-}
 
 const OUTPUT = {
   schema: { type: 'json' } as const,
@@ -121,7 +120,7 @@ export function installDiscussionTools(ctx: Context): void {
 
 async function executeComment(
   ctx: Context,
-  agent: CallerAgent | undefined,
+  agent: Agent | undefined,
   signal: AbortSignal,
   body: string,
   mentions: readonly string[],
@@ -144,25 +143,23 @@ async function executeComment(
 
 async function resolveCallerWorkspace(
   ctx: Context,
-  agent: CallerAgent | undefined,
+  agent: Agent | undefined,
   signal: AbortSignal,
 ): Promise<
-  | { readonly agent: CallerAgent; readonly workspace: NonNullable<Awaited<ReturnType<typeof ctx.workspaceRegistry.resolveByPath>>> }
+  | { readonly agent: Agent; readonly workspace: NonNullable<Awaited<ReturnType<typeof ctx.workspaceRegistry.resolveByPath>>> }
   | { readonly error: ToolResult }
 > {
-  const cwd = agent?.session.header.cwd
-  if (agent === undefined || cwd === undefined) return { error: failure('NO_CALLER_WORKSPACE', '讨论工具需要来自拥有工作区的会话。') }
+  if (agent === undefined) return { error: failure('NO_CALLER_WORKSPACE', '讨论工具需要来自拥有工作区的会话。') }
   try {
-    signal.throwIfAborted()
-    const workspace = await ctx.workspaceRegistry.resolveByPath(cwd)
-    signal.throwIfAborted()
-    if (workspace === undefined) return { error: failure('WORKSPACE_UNREGISTERED', '当前会话工作区尚未注册到 DSH。') }
-    if (!workspace.sessionIds.some(sessionId => String(sessionId) === String(agent.id))) {
+    const resolved = await resolveRepositoryWorkspace(ctx, agent, signal)
+    const workspace = resolved.workspace
+    if (resolved.source !== 'setrepo' && !workspace.sessionIds.some(sessionId => String(sessionId) === String(agent.id))) {
       return { error: failure('CALLER_OUTSIDE_WORKSPACE', '当前智能体会话不属于解析出的工作区，拒绝记录或发送讨论。') }
     }
     return { agent, workspace }
   } catch (error) {
     if (isAbortError(error)) throw error
+    if (error instanceof WorkspaceSelectionError) return { error: failure(error.code, error.message) }
     return { error: failure('DISCUSSION_FAILED', '无法安全解析当前会话工作区。') }
   }
 }
