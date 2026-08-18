@@ -39,6 +39,9 @@ const MAX_INTERVAL_MINUTES = 1_440
 const DEFAULT_INTERVAL_MINUTES = 15
 const MAX_PREVIEW_BYTES = 64 * 1024
 const MAX_OBJECT_JSON_BYTES = 4 * 1024 * 1024
+const MAX_DIFF_MATRIX_CELLS = 1_000_000
+const MAX_DIFF_OUTPUT_LINES = 2_000
+const DIFF_CONTEXT_LINES = 3
 const SHA256_ID = /^sha256:[a-f0-9]{64}$/u
 const EXPORT_ID = /^export_[A-Za-z0-9_-]{8,120}$/u
 
@@ -225,6 +228,51 @@ export interface FileBackupExportResult {
   readonly totalBytes: number
 }
 
+export type FileBackupChangeKind = 'added' | 'modified' | 'deleted'
+
+export interface FileBackupChange {
+  readonly path: string
+  readonly kind: FileBackupChangeKind
+  readonly before?: FileBackupEntry
+  readonly after?: FileBackupEntry
+}
+
+export interface FileBackupComparison {
+  readonly base: FileBackupSnapshotSummary | null
+  readonly head: FileBackupSnapshotSummary | null
+  readonly changes: readonly FileBackupChange[]
+  readonly counts: { readonly added: number; readonly modified: number; readonly deleted: number }
+  readonly truncated: boolean
+  readonly nextCursor?: string
+}
+
+export interface FileBackupDiffLine {
+  readonly kind: 'context' | 'added' | 'deleted' | 'separator'
+  readonly beforeLine?: number
+  readonly afterLine?: number
+  readonly content?: string
+  readonly lineBreak?: boolean
+}
+
+export interface FileBackupFileDiff {
+  readonly baseSnapshotId: Sha256Id | null
+  readonly headSnapshotId: Sha256Id | null
+  readonly path: string
+  readonly kind: FileBackupChangeKind
+  readonly before?: Pick<FileBackupEntry, 'size' | 'mode' | 'blob'>
+  readonly after?: Pick<FileBackupEntry, 'size' | 'mode' | 'blob'>
+  readonly display: 'text' | 'binary' | 'too-large' | 'metadata-only'
+  readonly lines: readonly FileBackupDiffLine[]
+  readonly truncated: boolean
+}
+
+/** @internal Deterministic boundary observation for repository tests only. */
+export interface FileBackupTestHooks {
+  readonly checkpoint?: (
+    name: 'capture-lock-acquired' | 'object-created' | 'export-before-publish' | 'export-published',
+  ) => void | Promise<void>
+}
+
 interface BackupContext {
   readonly workspaceRoot: string
   readonly repositoryRoot: string
@@ -272,7 +320,6 @@ interface SourceObservation {
 
 interface CaptureDraft {
   readonly manifest: FileBackupManifest
-  readonly manifestId: Sha256Id
   readonly ignoredFiles: number
   readonly totalBytes: number
 }
@@ -470,6 +517,7 @@ export class FileBackupRepository {
     workspaceId: string,
     reason: FileBackupReason = 'manual',
     signal?: AbortSignal,
+    testHooks?: FileBackupTestHooks,
   ): Promise<FileBackupCaptureResult> {
     const context = await resolveBackupContext(workspacePath, workspaceId, signal)
     if (!await backupRootExists(context, signal)) {
@@ -478,6 +526,8 @@ export class FileBackupRepository {
     let captureLease: BackupLockLease | undefined
     try {
       captureLease = await acquireBackupLock(inside(context.backupRoot, 'capture.lock'), signal)
+      await testHooks?.checkpoint?.('capture-lock-acquired')
+      assertNotAborted(signal)
       const before = await readBackupState(context, signal)
       if (!before.enabled || before.config === undefined || before.configId === undefined) {
         throw new FileBackupError('BACKUP_DISABLED', '此仓库的文件自动备份尚未启用。')
@@ -490,7 +540,7 @@ export class FileBackupRepository {
         throw new FileBackupError('BACKUP_LIMIT_EXCEEDED', '文件备份对象库接近 2 GiB 上限；v1 不会自动删除历史。')
       }
       const configId = before.configId
-      const draft = await captureSource(context, before.config, signal)
+      const draft = await captureSource(context, before.config, signal, testHooks)
       const storedAfter = await measureObjectStore(context)
       if (storedAfter > MAX_OBJECT_STORE_BYTES) {
         throw new FileBackupError('BACKUP_LIMIT_EXCEEDED', '文件备份对象库超过 2 GiB 上限，本次快照未发布。')
@@ -503,9 +553,16 @@ export class FileBackupRepository {
           throw new FileBackupError('BACKUP_LIMIT_EXCEEDED', `文件快照已达到 ${MAX_SNAPSHOTS} 个上限；v1 不会自动删除历史。`)
         }
         const latest = state.snapshots.at(-1)
-        if (latest?.snapshot.manifest === draft.manifestId) {
-          return { created: false, snapshot: snapshotSummary(latest.id, latest.snapshot), status: statusView(state) }
+        if (latest !== undefined) {
+          const latestManifest = await readManifest(locked, latest.snapshot.manifest, signal)
+          assertSnapshotManifest(latest.snapshot, latestManifest)
+          if (sameBackupContent(latestManifest, draft.manifest)) {
+            return { created: false, snapshot: snapshotSummary(latest.id, latest.snapshot), status: statusView(state) }
+          }
+        } else if (draft.manifest.entries.length === 0) {
+          return { created: false, snapshot: null, status: statusView(state) }
         }
+        const manifestId = await writeJsonObject(locked, draft.manifest, signal)
         const capturedAt = new Date().toISOString()
         const snapshot: FileBackupSnapshot = {
           format: FILE_BACKUP_SNAPSHOT_FORMAT,
@@ -514,7 +571,7 @@ export class FileBackupRepository {
           workspaceId: locked.workspaceId,
           parent: latest?.id ?? null,
           config: configId,
-          manifest: draft.manifestId,
+          manifest: manifestId,
           reason,
           capturedAt,
           repositoryHead: locked.repositoryHead,
@@ -579,7 +636,104 @@ export class FileBackupRepository {
     const context = await resolveBackupContext(workspacePath, workspaceId, signal)
     if (!await backupRootExists(context, signal)) return []
     const state = await readBackupState(context, signal)
-    return state.snapshots.slice(-limit).reverse().map(item => snapshotSummary(item.id, item.snapshot))
+    const visible: FileBackupSnapshotSummary[] = []
+    let previous: FileBackupManifest = emptyBackupManifest()
+    for (const item of state.snapshots) {
+      const manifest = await readManifest(context, item.snapshot.manifest, signal)
+      assertSnapshotManifest(item.snapshot, manifest)
+      if (!sameBackupContent(previous, manifest)) visible.push(snapshotSummary(item.id, item.snapshot))
+      previous = manifest
+    }
+    return visible.slice(-limit).reverse()
+  }
+
+  static async compare(
+    workspacePath: string,
+    workspaceId: string,
+    baseSelector: string,
+    headSelector: string,
+    limit = 250,
+    cursor?: string,
+    signal?: AbortSignal,
+  ): Promise<FileBackupComparison> {
+    if (!Number.isSafeInteger(limit) || limit < 1 || limit > 250) {
+      throw new FileBackupError('BACKUP_INVALID_CONFIG', '文件差异 limit 必须在 1–250 之间。')
+    }
+    const context = await resolveBackupContext(workspacePath, workspaceId, signal)
+    if (!await backupRootExists(context, signal)) {
+      throw new FileBackupError('BACKUP_NOT_CONFIGURED', '此仓库尚未配置文件备份。')
+    }
+    const state = await readBackupState(context, signal)
+    const base = selectOptionalSnapshot(state, baseSelector)
+    const head = selectOptionalSnapshot(state, headSelector)
+    const baseManifest = base === null ? emptyBackupManifest() : await readManifest(context, base.snapshot.manifest, signal)
+    const headManifest = head === null ? emptyBackupManifest() : await readManifest(context, head.snapshot.manifest, signal)
+    if (base !== null) assertSnapshotManifest(base.snapshot, baseManifest)
+    if (head !== null) assertSnapshotManifest(head.snapshot, headManifest)
+    const allChanges = compareBackupManifests(baseManifest, headManifest)
+    const counts = { added: 0, modified: 0, deleted: 0 }
+    for (const change of allChanges) counts[change.kind] += 1
+    const normalizedCursor = cursor === undefined ? undefined : normalizeRelativePath(cursor)
+    const available = normalizedCursor === undefined
+      ? allChanges
+      : allChanges.filter(change => change.path > normalizedCursor)
+    const changes = available.slice(0, limit)
+    const truncated = changes.length < available.length
+    return {
+      base: base === null ? null : snapshotSummary(base.id, base.snapshot),
+      head: head === null ? null : snapshotSummary(head.id, head.snapshot),
+      changes,
+      counts,
+      truncated,
+      ...(truncated && changes.length > 0 ? { nextCursor: changes.at(-1)!.path } : {}),
+    }
+  }
+
+  static async fileDiff(
+    workspacePath: string,
+    workspaceId: string,
+    baseSelector: string,
+    headSelector: string,
+    path: string,
+    signal?: AbortSignal,
+  ): Promise<FileBackupFileDiff> {
+    const context = await resolveBackupContext(workspacePath, workspaceId, signal)
+    if (!await backupRootExists(context, signal)) {
+      throw new FileBackupError('BACKUP_NOT_CONFIGURED', '此仓库尚未配置文件备份。')
+    }
+    const state = await readBackupState(context, signal)
+    const base = selectOptionalSnapshot(state, baseSelector)
+    const head = selectOptionalSnapshot(state, headSelector)
+    const baseManifest = base === null ? emptyBackupManifest() : await readManifest(context, base.snapshot.manifest, signal)
+    const headManifest = head === null ? emptyBackupManifest() : await readManifest(context, head.snapshot.manifest, signal)
+    if (base !== null) assertSnapshotManifest(base.snapshot, baseManifest)
+    if (head !== null) assertSnapshotManifest(head.snapshot, headManifest)
+    const normalizedPath = normalizeRelativePath(path)
+    const before = baseManifest.entries.find(entry => entry.path === normalizedPath)
+    const after = headManifest.entries.find(entry => entry.path === normalizedPath)
+    const kind = backupChangeKind(before, after)
+    if (kind === undefined) throw new FileBackupError('BACKUP_FILE_NOT_FOUND', '两个版本之间没有此文件的内容或权限变化。')
+    const resultBase = {
+      baseSnapshotId: base?.id ?? null,
+      headSnapshotId: head?.id ?? null,
+      path: normalizedPath,
+      kind,
+      ...(before === undefined ? {} : { before: entryMetadata(before) }),
+      ...(after === undefined ? {} : { after: entryMetadata(after) }),
+    }
+    if (before?.blob === after?.blob) {
+      return { ...resultBase, display: 'metadata-only', lines: [], truncated: false }
+    }
+    if ((before?.size ?? 0) > MAX_PREVIEW_BYTES || (after?.size ?? 0) > MAX_PREVIEW_BYTES) {
+      return { ...resultBase, display: 'too-large', lines: [], truncated: false }
+    }
+    const beforeText = before === undefined ? '' : await readDiffText(context, before, signal)
+    const afterText = after === undefined ? '' : await readDiffText(context, after, signal)
+    if (beforeText === undefined || afterText === undefined) {
+      return { ...resultBase, display: 'binary', lines: [], truncated: false }
+    }
+    const rendered = renderTextDiff(beforeText, afterText)
+    return { ...resultBase, display: 'text', lines: rendered.lines, truncated: rendered.truncated }
   }
 
   static async preview(
@@ -626,6 +780,7 @@ export class FileBackupRepository {
     workspaceId: string,
     snapshotSelector: string,
     signal?: AbortSignal,
+    testHooks?: FileBackupTestHooks,
   ): Promise<FileBackupExportResult> {
     const context = await resolveBackupContext(workspacePath, workspaceId, signal)
     if (!await backupRootExists(context, signal)) {
@@ -659,8 +814,18 @@ export class FileBackupRepository {
       await withBackupLock(context, signal, async (locked, state) => {
         const stillPresent = state.snapshots.some(item => item.id === selected.id)
         if (!stillPresent) throw new FileBackupError('BACKUP_CONFLICT', '所选文件快照在导出期间失去可达性。')
-        await rename(canonicalStaging, destination)
-        published = true
+        await testHooks?.checkpoint?.('export-before-publish')
+        assertNotAborted(signal)
+        try {
+          await rename(canonicalStaging, destination)
+          published = true
+        } catch (error) {
+          if (!await movePublishedDespiteError(canonicalStaging, destination, inside(context.backupRoot, 'exports'))) {
+            throw error
+          }
+          published = true
+        }
+        await testHooks?.checkpoint?.('export-published')
         const destinationStats = await lstat(destination)
         if (destinationStats.isSymbolicLink() || !destinationStats.isDirectory()) {
           throw new FileBackupError('BACKUP_PATH_ESCAPE', '恢复导出目录发布后身份无效。')
@@ -669,7 +834,7 @@ export class FileBackupRepository {
         const nextState = await appendBackupEvent(locked, state, 'backup.restore.exported', {
           snapshot: selected.id,
           exportId,
-        }, signal)
+        })
         if (nextState.journalEntries !== state.journalEntries + 1) {
           throw new FileBackupError('BACKUP_CONFLICT', '恢复导出审计未能追加。')
         }
@@ -931,14 +1096,21 @@ async function ensureBackupRoot(context: BackupContext, signal?: AbortSignal): P
     await syncDirectory(inside(stagingRoot, '.staging'), signal)
     await syncDirectory(inside(stagingRoot, 'exports'), signal)
     await syncDirectory(stagingRoot, signal)
+    let published = false
+    assertNotAborted(signal)
     try {
       await rename(stagingRoot, context.backupRoot)
       staged = false
-      await syncDirectory(context.repositoryRoot, signal)
+      published = true
     } catch (error) {
-      if (errorCode(error) !== 'EEXIST' && errorCode(error) !== 'ENOTEMPTY') throw error
+      if (errorCode(error) !== 'EEXIST' && errorCode(error) !== 'ENOTEMPTY') {
+        if (!await movePublishedDespiteError(stagingRoot, context.backupRoot, context.repositoryRoot)) throw error
+        staged = false
+        published = true
+      }
     }
-    await assertBackupRoot(context, signal)
+    if (published) await syncDirectory(context.repositoryRoot)
+    await assertBackupRoot(context, published ? undefined : signal)
   } catch (error) {
     if (error instanceof FileBackupError || error instanceof RepositoryReadError || isAbortError(error)) throw error
     throw new FileBackupError('BACKUP_IO', '文件备份目录未能安全初始化。')
@@ -1284,6 +1456,7 @@ async function captureSource(
   context: BackupContext,
   config: FileBackupConfig,
   signal?: AbortSignal,
+  testHooks?: FileBackupTestHooks,
 ): Promise<CaptureDraft> {
   assertNotAborted(signal)
   await context.reader.assertMutationRoot(signal)
@@ -1351,7 +1524,7 @@ async function captureSource(
     if (totalBytes > MAX_SNAPSHOT_BYTES) {
       throw new FileBackupError('BACKUP_LIMIT_EXCEEDED', '单个文件快照超过 512 MiB 总量上限。')
     }
-    const captured = await captureFile(context, canonical, normalizedPath, before, signal)
+    const captured = await captureFile(context, canonical, normalizedPath, before, signal, testHooks)
     first.set(normalizedPath, captured.observation)
     entries.push(captured.entry)
   }
@@ -1396,8 +1569,193 @@ async function captureSource(
     formatVersion: FILE_BACKUP_FORMAT_VERSION,
     entries,
   }
-  const manifestId = await writeJsonObject(context, manifest, signal)
-  return { manifest, manifestId, ignoredFiles, totalBytes }
+  return { manifest, ignoredFiles, totalBytes }
+}
+
+function sameBackupContent(left: FileBackupManifest, right: FileBackupManifest): boolean {
+  if (left.entries.length !== right.entries.length) return false
+  return left.entries.every((entry, index) => {
+    const other = right.entries[index]
+    return other !== undefined
+      && entry.path === other.path
+      && entry.size === other.size
+      && entry.mode === other.mode
+      && entry.blob === other.blob
+  })
+}
+
+function emptyBackupManifest(): FileBackupManifest {
+  return { format: FILE_BACKUP_MANIFEST_FORMAT, formatVersion: FILE_BACKUP_FORMAT_VERSION, entries: [] }
+}
+
+function selectOptionalSnapshot(
+  state: BackupState,
+  selector: string,
+): { readonly id: Sha256Id; readonly snapshot: FileBackupSnapshot } | null {
+  return selector === 'ROOT' ? null : selectSnapshot(state, selector)
+}
+
+function compareBackupManifests(base: FileBackupManifest, head: FileBackupManifest): FileBackupChange[] {
+  const before = new Map(base.entries.map(entry => [entry.path, entry]))
+  const after = new Map(head.entries.map(entry => [entry.path, entry]))
+  const paths = [...new Set([...before.keys(), ...after.keys()])].sort(compareCodePoint)
+  const changes: FileBackupChange[] = []
+  for (const path of paths) {
+    const beforeEntry = before.get(path)
+    const afterEntry = after.get(path)
+    const kind = backupChangeKind(beforeEntry, afterEntry)
+    if (kind === undefined) continue
+    changes.push({
+      path,
+      kind,
+      ...(beforeEntry === undefined ? {} : { before: beforeEntry }),
+      ...(afterEntry === undefined ? {} : { after: afterEntry }),
+    })
+  }
+  return changes
+}
+
+function backupChangeKind(before: FileBackupEntry | undefined, after: FileBackupEntry | undefined): FileBackupChangeKind | undefined {
+  if (before === undefined) return after === undefined ? undefined : 'added'
+  if (after === undefined) return 'deleted'
+  return before.blob === after.blob && before.size === after.size && before.mode === after.mode ? undefined : 'modified'
+}
+
+function entryMetadata(entry: FileBackupEntry): Pick<FileBackupEntry, 'size' | 'mode' | 'blob'> {
+  return { size: entry.size, mode: entry.mode, blob: entry.blob }
+}
+
+async function readDiffText(
+  context: BackupContext,
+  entry: FileBackupEntry,
+  signal?: AbortSignal,
+): Promise<string | undefined> {
+  const bytes = await readObjectBytes(context, entry.blob, MAX_PREVIEW_BYTES, signal)
+  if (bytes.includes(0)) return undefined
+  try {
+    return new TextDecoder('utf-8', { fatal: true }).decode(bytes)
+  } catch {
+    return undefined
+  }
+}
+
+interface TextToken {
+  readonly value: string
+  readonly content: string
+  readonly lineBreak: boolean
+}
+
+function textTokens(source: string): TextToken[] {
+  if (source === '') return []
+  const hasFinalLineBreak = source.endsWith('\n')
+  const lines = source.split('\n')
+  if (hasFinalLineBreak) lines.pop()
+  return lines.map((content, index) => {
+    const lineBreak = index < lines.length - 1 || hasFinalLineBreak
+    return { value: lineBreak ? `${content}\n` : content, content, lineBreak }
+  })
+}
+
+function renderTextDiff(beforeSource: string, afterSource: string): {
+  readonly lines: readonly FileBackupDiffLine[]
+  readonly truncated: boolean
+} {
+  const before = textTokens(beforeSource)
+  const after = textTokens(afterSource)
+  const operations = before.length * after.length <= MAX_DIFF_MATRIX_CELLS
+    ? lcsDiff(before, after)
+    : boundedDiff(before, after)
+  const changeIndexes = operations.flatMap((line, index) => line.kind === 'context' ? [] : [index])
+  if (changeIndexes.length === 0) return { lines: [], truncated: false }
+  const ranges: { start: number; end: number }[] = []
+  for (const index of changeIndexes) {
+    const start = Math.max(0, index - DIFF_CONTEXT_LINES)
+    const end = Math.min(operations.length, index + DIFF_CONTEXT_LINES + 1)
+    const previous = ranges.at(-1)
+    if (previous !== undefined && start <= previous.end) previous.end = Math.max(previous.end, end)
+    else ranges.push({ start, end })
+  }
+  const compact: FileBackupDiffLine[] = []
+  for (let index = 0; index < ranges.length; index += 1) {
+    if (index > 0) compact.push({ kind: 'separator' })
+    compact.push(...operations.slice(ranges[index]!.start, ranges[index]!.end))
+  }
+  if (compact.length <= MAX_DIFF_OUTPUT_LINES) return { lines: compact, truncated: false }
+  return {
+    lines: [...compact.slice(0, MAX_DIFF_OUTPUT_LINES - 1), { kind: 'separator' }],
+    truncated: true,
+  }
+}
+
+function lcsDiff(before: readonly TextToken[], after: readonly TextToken[]): FileBackupDiffLine[] {
+  const matrix = Array.from({ length: before.length + 1 }, () => new Uint32Array(after.length + 1))
+  for (let left = before.length - 1; left >= 0; left -= 1) {
+    for (let right = after.length - 1; right >= 0; right -= 1) {
+      matrix[left]![right] = before[left]!.value === after[right]!.value
+        ? matrix[left + 1]![right + 1]! + 1
+        : Math.max(matrix[left + 1]![right]!, matrix[left]![right + 1]!)
+    }
+  }
+  const result: FileBackupDiffLine[] = []
+  let left = 0
+  let right = 0
+  let beforeLine = 1
+  let afterLine = 1
+  while (left < before.length || right < after.length) {
+    if (left < before.length && right < after.length && before[left]!.value === after[right]!.value) {
+      result.push(diffLine('context', before[left]!, beforeLine, afterLine))
+      left += 1
+      right += 1
+      beforeLine += 1
+      afterLine += 1
+    } else if (right < after.length && (left >= before.length || matrix[left]![right + 1]! > matrix[left + 1]![right]!)) {
+      result.push(diffLine('added', after[right]!, undefined, afterLine))
+      right += 1
+      afterLine += 1
+    } else {
+      result.push(diffLine('deleted', before[left]!, beforeLine, undefined))
+      left += 1
+      beforeLine += 1
+    }
+  }
+  return result
+}
+
+function boundedDiff(before: readonly TextToken[], after: readonly TextToken[]): FileBackupDiffLine[] {
+  let prefix = 0
+  while (prefix < before.length && prefix < after.length && before[prefix]!.value === after[prefix]!.value) prefix += 1
+  let suffix = 0
+  while (suffix < before.length - prefix && suffix < after.length - prefix
+    && before[before.length - suffix - 1]!.value === after[after.length - suffix - 1]!.value) suffix += 1
+  const result: FileBackupDiffLine[] = []
+  for (let index = 0; index < prefix; index += 1) result.push(diffLine('context', before[index]!, index + 1, index + 1))
+  for (let index = prefix; index < before.length - suffix; index += 1) {
+    result.push(diffLine('deleted', before[index]!, index + 1, undefined))
+  }
+  for (let index = prefix; index < after.length - suffix; index += 1) {
+    result.push(diffLine('added', after[index]!, undefined, index + 1))
+  }
+  for (let offset = suffix; offset > 0; offset -= 1) {
+    const beforeIndex = before.length - offset
+    const afterIndex = after.length - offset
+    result.push(diffLine('context', before[beforeIndex]!, beforeIndex + 1, afterIndex + 1))
+  }
+  return result
+}
+
+function diffLine(
+  kind: 'context' | 'added' | 'deleted',
+  token: TextToken,
+  beforeLine: number | undefined,
+  afterLine: number | undefined,
+): FileBackupDiffLine {
+  return {
+    kind,
+    ...(beforeLine === undefined ? {} : { beforeLine }),
+    ...(afterLine === undefined ? {} : { afterLine }),
+    content: token.content,
+    lineBreak: token.lineBreak,
+  }
 }
 
 async function captureFile(
@@ -1406,6 +1764,7 @@ async function captureFile(
   relativePath: string,
   pathStats: Stats,
   signal?: AbortSignal,
+  testHooks?: FileBackupTestHooks,
 ): Promise<{ readonly entry: FileBackupEntry; readonly observation: SourceObservation }> {
   assertNotAborted(signal)
   let handle: Awaited<ReturnType<typeof openFile>> | undefined
@@ -1441,7 +1800,7 @@ async function captureFile(
     if (!isContainedBy(context.workspaceRoot, resolvedAfter) || resolve(resolvedAfter) !== resolve(canonicalPath)) {
       throw new FileBackupError('BACKUP_PATH_ESCAPE', `文件“${relativePath}”在读取期间逃逸了工作区。`)
     }
-    const blob = await writeRawObject(context, bytes, signal)
+    const blob = await writeRawObject(context, bytes, signal, testHooks)
     const observation = observeSourceFile(opened)
     return {
       entry: {
@@ -1567,6 +1926,23 @@ function lastSegment(path: string): string {
   return path.split('/').at(-1) ?? path
 }
 
+async function movePublishedDespiteError(stagingPath: string, destination: string, parent: string): Promise<boolean> {
+  try {
+    await lstat(stagingPath)
+    return false
+  } catch (error) {
+    if (errorCode(error) !== 'ENOENT') return false
+  }
+  try {
+    const item = await lstat(destination)
+    if (item.isSymbolicLink() || !item.isDirectory() || item.ino === 0) return false
+    const canonical = await realpath(destination)
+    return isContainedBy(parent, canonical) && resolve(canonical) === resolve(destination)
+  } catch {
+    return false
+  }
+}
+
 async function assertPrivateExportParent(stagingRoot: string, parentPath: string): Promise<void> {
   const pathFromRoot = relative(stagingRoot, parentPath)
   const segments = pathFromRoot === '' ? [] : pathFromRoot.split(/[\\/]/u)
@@ -1592,11 +1968,18 @@ async function writeJsonObject(context: BackupContext, value: unknown, signal?: 
   return writeRawObject(context, bytes, signal)
 }
 
-async function writeRawObject(context: BackupContext, bytes: Buffer, signal?: AbortSignal): Promise<Sha256Id> {
+async function writeRawObject(
+  context: BackupContext,
+  bytes: Buffer,
+  signal?: AbortSignal,
+  testHooks?: FileBackupTestHooks,
+): Promise<Sha256Id> {
   assertNotAborted(signal)
   const id = hashRawId(bytes)
   const path = await objectPath(context, id, true, signal)
   let handle: Awaited<ReturnType<typeof openFile>> | undefined
+  let created: Stats | undefined
+  let objectComplete = false
   try {
     const flags = constants.O_WRONLY | constants.O_CREAT | constants.O_EXCL
       | (process.platform === 'win32' ? 0 : constants.O_NOFOLLOW)
@@ -1605,6 +1988,9 @@ async function writeRawObject(context: BackupContext, bytes: Buffer, signal?: Ab
     if (!opened.isFile() || opened.ino === 0) {
       throw new FileBackupError('BACKUP_PATH_ESCAPE', '文件备份对象无法绑定普通文件身份。')
     }
+    created = opened
+    await testHooks?.checkpoint?.('object-created')
+    assertNotAborted(signal)
     await handle.writeFile(bytes)
     await handle.sync()
     const written = await handle.stat()
@@ -1613,9 +1999,39 @@ async function writeRawObject(context: BackupContext, bytes: Buffer, signal?: Ab
     }
     await handle.close()
     handle = undefined
-    await syncDirectory(dirname(path), signal)
+    objectComplete = true
+    // A fully written, file-synced content-addressed object is the irreversible
+    // boundary. Finish directory durability without the caller signal so an
+    // abort cannot turn a valid persisted object into an ambiguous outcome.
+    await syncDirectory(dirname(path))
     return id
   } catch (error) {
+    if (created !== undefined && !objectComplete) {
+      if (handle !== undefined) {
+        try {
+          await handle.close()
+        } catch {
+          // Continue with identity-checked cleanup of the incomplete object.
+        }
+        handle = undefined
+      }
+      try {
+        const current = await lstat(path)
+        if (!current.isSymbolicLink() && current.isFile() && sameFilesystemObject(created, current)) {
+          await unlink(path)
+          try {
+            await syncDirectory(dirname(path))
+          } catch {
+            // Cleanup durability does not replace the primary write failure.
+          }
+        }
+      } catch (cleanupError) {
+        if (errorCode(cleanupError) !== 'ENOENT') {
+          // An unexpected replacement remains untouched and will fail closed
+          // if it is ever reached through a published manifest.
+        }
+      }
+    }
     if (errorCode(error) === 'EEXIST') {
       const existing = await readObjectBytes(context, id, Math.max(bytes.byteLength, MAX_OBJECT_JSON_BYTES), signal)
       if (!existing.equals(bytes)) {
@@ -1873,14 +2289,7 @@ async function appendBackupEvent(
   if (state.journalEntries + 1 > MAX_BACKUP_JOURNAL_LINES) {
     throw new FileBackupError('BACKUP_LIMIT_EXCEEDED', '文件备份日志达到 10,000 条上限。')
   }
-  await appendBackupLine(context, state, line, lineBytes, signal)
-  const verified = await readBackupState(context)
-  if (verified.journalEntries !== state.journalEntries + 1
-    || verified.tailChecksum !== record.checksum
-    || verified.journal.size !== state.journal.size + lineBytes.byteLength) {
-    throw new FileBackupError('BACKUP_CONFLICT', '文件备份日志追加后的状态校验不匹配。')
-  }
-  return verified
+  return appendBackupLine(context, state, line, lineBytes, record.checksum, signal)
 }
 
 function makeBackupRecord(
@@ -1906,8 +2315,9 @@ async function appendBackupLine(
   state: BackupState,
   line: string,
   lineBytes: Buffer,
+  expectedChecksum: Sha256Id,
   signal?: AbortSignal,
-): Promise<void> {
+): Promise<BackupState> {
   const path = inside(context.backupRoot, 'journal.jsonl')
   assertNotAborted(signal)
   await assertBackupRoot(context, signal)
@@ -1937,9 +2347,11 @@ async function appendBackupLine(
       const verified = await readBackupState(context)
       if (verified.journalEntries !== state.journalEntries + 1
         || verified.journal.size !== expectedSize
+        || verified.tailChecksum !== expectedChecksum
         || !sameObservation(written, verified.journal)) {
         throw new Error('backup journal post-append mismatch')
       }
+      return verified
     } catch {
       const restored = await restoreBackupJournalSize(handle, opened, state.journal.size, expectedSize, lineBytes)
       if (!restored) {
@@ -2068,6 +2480,7 @@ async function writeNewFile(
     handle = await openFile(path, flags, mode & 0o777)
     const opened = await handle.stat()
     if (!opened.isFile() || opened.ino === 0) throw new FileBackupError('BACKUP_PATH_ESCAPE', '新文件无法绑定普通文件身份。')
+    assertNotAborted(signal)
     await handle.writeFile(bytes)
     await handle.sync()
     const written = await handle.stat()

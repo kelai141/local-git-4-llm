@@ -1,6 +1,6 @@
 {
   "name": "@dsh-external/local-git-4-llm",
-  "version": "0.6.0",
+  "version": "0.6.1",
   "description": "A workspace-scoped DSH knowledge repository with explicit immutable local file backup.",
   "private": true,
   "type": "module",

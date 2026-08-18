@@ -23,21 +23,32 @@ export class FileBackupScheduler {
   private readonly controllers = new Map<string, AbortController>()
   private readonly failures = new Map<string, { readonly message: string; readonly at: string }>()
   private readonly configuredWorkspaceIds = new Set<string>()
+  private reconcileController: AbortController | undefined
+  private reconcileInFlight: Promise<void> | undefined
   private bootstrapped = false
   private stopped = false
 
-  constructor(private readonly ctx: Context) {}
+  constructor(
+    private readonly ctx: Context,
+    private readonly captureRunner: typeof FileBackupRepository.capture = FileBackupRepository.capture,
+  ) {}
 
   install(): void {
     this.ctx.effect(() => {
-      const disposeInitial = this.ctx.timeout(() => { void this.reconcile() }, INITIAL_RECONCILE_DELAY_MS)
-      const disposeInterval = this.ctx.interval(() => { void this.reconcile() }, RECONCILE_INTERVAL_MS)
+      const disposeInitial = this.ctx.timeout(() => { void this.requestReconcile().catch(() => undefined) }, INITIAL_RECONCILE_DELAY_MS)
+      const disposeInterval = this.ctx.interval(() => { void this.requestReconcile().catch(() => undefined) }, RECONCILE_INTERVAL_MS)
       return async () => {
         this.stopped = true
         disposeInitial()
         disposeInterval()
+        this.reconcileController?.abort(new DOMException('backup scheduler disposed', 'AbortError'))
         for (const controller of this.controllers.values()) controller.abort(new DOMException('backup scheduler disposed', 'AbortError'))
-        await Promise.allSettled(this.inFlight.values())
+        await Promise.allSettled([
+          ...this.inFlight.values(),
+          ...(this.reconcileInFlight === undefined ? [] : [this.reconcileInFlight]),
+        ])
+        this.reconcileController = undefined
+        this.reconcileInFlight = undefined
         this.controllers.clear()
         this.inFlight.clear()
       }
@@ -69,12 +80,18 @@ export class FileBackupScheduler {
     reason: FileBackupReason,
     signal?: AbortSignal,
   ): Promise<FileBackupCaptureResult> {
+    if (this.stopped) throw new DOMException('backup scheduler disposed', 'AbortError')
     const workspaceId = String(workspace.id)
     const existing = this.inFlight.get(workspaceId)
     if (existing !== undefined) {
       throw new FileBackupError('BACKUP_BUSY', '此仓库已有正在执行的文件备份。')
     }
-    const operation = FileBackupRepository.capture(workspace.path, workspaceId, reason, signal)
+    const controller = new AbortController()
+    const forwardAbort = () => controller.abort(signal?.reason ?? new DOMException('backup capture aborted', 'AbortError'))
+    if (signal?.aborted) forwardAbort()
+    else signal?.addEventListener('abort', forwardAbort, { once: true })
+    this.controllers.set(workspaceId, controller)
+    const operation = this.captureRunner(workspace.path, workspaceId, reason, controller.signal)
       .then((result) => {
         this.failures.delete(workspaceId)
         return result
@@ -89,33 +106,52 @@ export class FileBackupScheduler {
         throw error
       })
       .finally(() => {
+        signal?.removeEventListener('abort', forwardAbort)
+        if (this.controllers.get(workspaceId) === controller) this.controllers.delete(workspaceId)
         if (this.inFlight.get(workspaceId) === operation) this.inFlight.delete(workspaceId)
       })
     this.inFlight.set(workspaceId, operation)
     return operation
   }
 
-  private async reconcile(): Promise<void> {
-    if (this.stopped) return
+  private requestReconcile(): Promise<void> {
+    if (this.stopped) return Promise.resolve()
+    if (this.reconcileInFlight !== undefined) return this.reconcileInFlight
+    const controller = new AbortController()
+    this.reconcileController = controller
+    const operation = this.reconcile(controller.signal).finally(() => {
+      if (this.reconcileController === controller) this.reconcileController = undefined
+      if (this.reconcileInFlight === operation) this.reconcileInFlight = undefined
+    })
+    this.reconcileInFlight = operation
+    return operation
+  }
+
+  private async reconcile(signal: AbortSignal): Promise<void> {
+    if (this.stopped || signal.aborted) return
+    const workspaces = this.ctx.workspaceRegistry.list()
     if (!this.bootstrapped) {
-      this.bootstrapped = true
-      for (const workspace of this.ctx.workspaceRegistry.list()) {
+      for (const workspace of workspaces) {
+        if (this.stopped || signal.aborted) return
         try {
-          if (await FileBackupRepository.hasBackupMarker(workspace.path)) {
+          if (await FileBackupRepository.hasBackupMarker(workspace.path, signal)) {
             this.configuredWorkspaceIds.add(String(workspace.id))
           }
         } catch (error) {
+          if (isAbortError(error)) return
           this.failures.set(String(workspace.id), { message: sanitizeFailure(error), at: new Date().toISOString() })
         }
       }
+      this.bootstrapped = true
     }
-    for (const workspace of this.ctx.workspaceRegistry.list()) {
-      if (this.stopped) return
+    for (const workspace of workspaces) {
+      if (this.stopped || signal.aborted) return
       const workspaceId = String(workspace.id)
       if (!this.configuredWorkspaceIds.has(workspaceId)) continue
       if (this.inFlight.has(workspaceId)) continue
       try {
-        const status = await FileBackupRepository.status(workspace.path, workspaceId)
+        const status = await FileBackupRepository.status(workspace.path, workspaceId, signal)
+        if (this.stopped || signal.aborted) return
         if (!status.enabled || status.config === undefined) {
           this.configuredWorkspaceIds.delete(workspaceId)
           continue
@@ -124,14 +160,9 @@ export class FileBackupScheduler {
           ? 0
           : Date.parse(status.latest.capturedAt) + status.config.intervalMinutes * 60_000
         if (Date.now() < dueAt) continue
-        const controller = new AbortController()
-        this.controllers.set(workspaceId, controller)
-        void this.captureNow(workspace, 'scheduled', controller.signal)
-          .catch(() => undefined)
-          .finally(() => {
-            if (this.controllers.get(workspaceId) === controller) this.controllers.delete(workspaceId)
-          })
+        void this.captureNow(workspace, 'scheduled').catch(() => undefined)
       } catch (error) {
+        if (isAbortError(error)) return
         if (error instanceof FileBackupError || !isExpectedUninitialized(error)) {
           this.failures.set(workspaceId, { message: sanitizeFailure(error), at: new Date().toISOString() })
         }

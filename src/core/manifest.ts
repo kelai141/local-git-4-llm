@@ -1,6 +1,6 @@
 /** Shared runtime facts used by the host lifecycle and management panel. */
 export const LOCAL_GIT_4_LLM_ID = '@dsh-external/local-git-4-llm'
-export const LOCAL_GIT_4_LLM_VERSION = '0.6.0'
+export const LOCAL_GIT_4_LLM_VERSION = '0.6.1'
 
 export interface RuntimeStatus {
   phase: 'M4-backup-preview'
@@ -27,7 +27,11 @@ export function createRuntimeStatus(): RuntimeStatus {
       'setrepo-and-panel-workspace-activation',
       'explicit-file-backup-opt-in',
       'content-addressed-file-snapshots',
+      'semantic-no-op-snapshot-suppression',
+      'snapshot-file-comparison-and-text-diff',
+      'github-files-changed-review',
       'scheduled-enabled-only-file-backup',
+      'cancellation-safe-backup-boundaries',
       'safe-export-only-restore',
       'no-source-scan-before-human-opt-in',
     ],

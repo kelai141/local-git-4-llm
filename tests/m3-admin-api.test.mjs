@@ -189,6 +189,26 @@ test('management API resolves registered workspaces and drives board, rollback, 
     body: JSON.stringify({ workspaceId: workspace.id, snapshot: enabledBackup.snapshot.id }),
   })
   assert.match(backupExport.relativePath, /^\.dsh-repo\/backup\/exports\/export_/u)
+  await writeFile(path.join(workspacePath, 'src', 'nested', 'data.txt'), 'nested backup v2\n', 'utf8')
+  const changedBackup = await apiJson(`${root}/backup/capture`, {
+    method: 'POST',
+    headers: { ...headers, 'content-type': 'application/json' },
+    body: JSON.stringify({ workspaceId: workspace.id }),
+  })
+  assert.equal(changedBackup.created, true)
+  const backupComparison = await apiJson(
+    `${root}/backup/compare?workspaceId=${workspace.id}&base=${encodeURIComponent(enabledBackup.snapshot.id)}&head=${encodeURIComponent(changedBackup.snapshot.id)}`,
+    { headers },
+  )
+  assert.deepEqual(backupComparison.counts, { added: 0, modified: 1, deleted: 0 })
+  assert.deepEqual(backupComparison.changes.map(change => change.path), ['src/nested/data.txt'])
+  const backupDiff = await apiJson(
+    `${root}/backup/diff?workspaceId=${workspace.id}&base=${encodeURIComponent(enabledBackup.snapshot.id)}&head=${encodeURIComponent(changedBackup.snapshot.id)}&path=${encodeURIComponent('src/nested/data.txt')}`,
+    { headers },
+  )
+  assert.equal(backupDiff.display, 'text')
+  assert(backupDiff.lines.some(line => line.kind === 'deleted' && line.content === 'nested backup'))
+  assert(backupDiff.lines.some(line => line.kind === 'added' && line.content === 'nested backup v2'))
 
   const first = await RepositoryWriter.commit(workspacePath, workspace.id, {
     message: '第一版',
@@ -314,7 +334,7 @@ test('management API resolves registered workspaces and drives board, rollback, 
   assert.equal(finalState.issues[0].id, issue.id)
   assert.deepEqual(finalState.issues[0].openedBy, { kind: 'agent', sessionId: 'session-live' })
   assert.equal(finalState.backup.enabled, true)
-  assert.equal(finalState.backup.snapshots, 1)
+  assert.equal(finalState.backup.snapshots, 2)
 
   const reader = await RepositoryReader.open(workspacePath, workspace.id)
   assert(reader)

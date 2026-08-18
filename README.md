@@ -6,12 +6,12 @@ append-only logical knowledge history with immutable, content-addressed
 physical file snapshots—without silently scanning a workspace merely because
 the plugin is installed.
 
-> **Current phase: 0.6.0 / M4 backup preview.**
+> **Current phase: 0.6.1 / M4 backup review preview.**
 > The hybrid package provides `/setrepo`, repository activation from the
 > Chinese management panel, explicit initialization and key/value commits,
 > immutable checkout and audited rollback, Issues/comments/agent relay, plus
-> opt-in scheduled file snapshots with history browsing, preview, and
-> export-only recovery.
+> opt-in scheduled file snapshots with GitHub-style two-version file review,
+> bounded preview, and export-only recovery.
 
 ## What the panel can do
 
@@ -26,6 +26,9 @@ The additive `shell.overlay` panel covers the complete normal workflow:
   enable/disable automatic backup;
 - create a snapshot immediately;
 - browse every snapshot and page through its file list;
+- compare any two effective snapshots (adjacent versions by default) in a
+  GitHub Files changed-style review that lists only added/modified/deleted
+  files, supports filtering/pagination, and renders a unified text diff;
 - preview bounded UTF-8 text while treating binary/large files safely;
 - export any historical snapshot to a new recovery directory without
   overwriting the current workspace.
@@ -73,9 +76,30 @@ Logical LLM knowledge and physical files deliberately do not share one journal:
 ```
 
 Both histories are append-only and checksum-verified. Backup blobs, manifests,
-configs, and snapshots use SHA-256 content IDs, so unchanged content is reused.
-If a new scan produces the same manifest as the latest snapshot, no duplicate
-snapshot event is appended.
+configs, and snapshots use SHA-256 content IDs, so unchanged bytes are reused:
+every published version is a logical full snapshot, while physical storage is
+incremental/content-addressed. If a scan has the same paths, modes, sizes, and
+blob IDs as the latest snapshot, no manifest object or snapshot event is
+published. An mtime-only touch is therefore a semantic no-op and does not add a
+visible version or consume additional object-store space.
+
+## Files changed review
+
+The **提交历史** tab reviews physical file versions separately from logical
+key/value commits. It selects the latest effective snapshot as head and the
+previous effective snapshot (or `ROOT`) as base. The review provides:
+
+- custom themed base/head pickers instead of native selects;
+- aggregate added/modified/deleted counts and a filterable changed-file list;
+- unified UTF-8 text diffs with three context lines and bounded output;
+- explicit binary, over-64-KiB, and metadata-only states without loading unsafe
+  or oversized content into the browser;
+- paged change lists for large comparisons and a single-column narrow-screen
+  fallback.
+
+Comparison endpoints accept only a registered `workspaceId`, snapshot IDs (or
+`ROOT`), and a validated snapshot-relative path. They never accept an absolute
+source path.
 
 ## File backup behavior
 
@@ -120,6 +144,14 @@ Current fail-closed limits:
 - 2 GiB object-store budget with a conservative one-snapshot reserve;
 - 16 explicit roots and depth 32;
 - no automatic pruning or guessed stale-lock deletion.
+
+Capture and export cancellation is checked immediately before each irreversible
+publication boundary. An incomplete newly created object is removed only after
+an identity check; a fully written/fsynced content-addressed object is retained.
+After an export directory becomes user-visible, caller cancellation is ignored
+long enough to finish audit bookkeeping, so the API never reports a simple
+pre-publication abort for already-published recovery bytes. Scheduler disposal
+aborts and awaits both reconciliation and every owned capture.
 
 ## Restore model
 
@@ -182,6 +214,12 @@ dev_reload_package {"packageName":"local-git-4-llm"}
 injector also runs the client `tsdown` build. WSL may print a harmless
 localhost/NAT diagnostic on Windows before a successful host compilation.
 
+The 0.6.1 M4 suite is validated against `@deepseek-ai/dsh@0.1.0-rc.7`:
+`npm run test:repository` passes 46/46 tests, and the real RC7 browser flow was
+checked with adjacent snapshots containing added, modified, deleted, binary,
+and large-file changes, plus a no-op rescan that changed neither journal nor
+object store.
+
 ## Safety summary
 
 - Installation/reload does not initialize a repository or scan source files.
@@ -191,6 +229,8 @@ localhost/NAT diagnostic on Windows before a successful host compilation.
   root tokens; it never accepts an absolute workspace path.
 - Writer and capture locks fail closed. Stale locks are preserved for manual
   diagnosis rather than guessed away.
+- No-op scans do not publish empty history; content-addressed objects are reused
+  across snapshots.
 - No remote upload, automatic pruning, in-place physical restore, corruption
   repair, or conversation harvesting is performed.
 

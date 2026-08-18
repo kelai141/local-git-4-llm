@@ -3,7 +3,7 @@
 ## 方案设计与汇报文档（v1）
 
 > 用途：本文件既是对需求的完整应答（方案），也是本阶段工作汇报（汇报）。
-> 状态：`0.6.0 / M4 BACKUP PREVIEW IMPLEMENTED` — 已交付 `/setrepo`、面板仓库激活、显式逻辑仓库、协作看板，以及需人类确认后才工作的内容寻址文件自动备份。本文后续保留了早期路线推演；若与本节或 README 冲突，以当前实现记录为准。
+> 状态：`0.6.1 / M4 BACKUP REVIEW PREVIEW IMPLEMENTED` — 已交付 `/setrepo`、面板仓库激活、显式逻辑仓库、协作看板、需人类确认后才工作的内容寻址文件自动备份，以及 GitHub Files changed 风格的双版本文件审阅。本文后续保留了早期路线推演；若与本节或 README 冲突，以当前实现记录为准。
 
 ---
 
@@ -14,7 +14,7 @@
 | 包名 | 形态 | 职责 |
 |---|---|---|
 | `@dsh-external/local-git-4-llm` | hybrid 插件 | 每工作区独立知识仓库引擎、会话同步 relay、原生 WebUI 看板及全部 `repo_*` 工具 |
-| `local-git-4-llm/bridge` | 暂缓 | 早期设想；0.6.0 不自动向会话注入仓库内容或提示 |
+| `local-git-4-llm/bridge` | 暂缓 | 早期设想；0.6.x 不自动向会话注入仓库内容或提示 |
 
 **关键落点（全部已用 Inspect 验证）：**
 
@@ -27,13 +27,13 @@
 - **现有工作区适配** → 按需采纳（`adopt.auto` 默认 false，建仓仅由显式 `/repo init` 或 `repo_adopt` 触发；M1a 的只读 `repo_*` 调用绝不建仓）；prompt 桥对**任意**会话下一 step 注入提示（已纳仓=仓库认知，未纳仓=一行可 adopt 提示，`adopt.promptHint` 默认 true）；不可写目录（如 System32）降级到 `~/.dsh/managers/<workspaceId>` 外部存储；数据定位用 workspaceId 而非 path 哈希（§4.9）
 - 美术风格 → 全部用官方主题 token `--dsw-alias-*`（`bg-layer-1/label-primary/brand-primary/state-error-primary` 等，light/dark 自适应）
 
-**里程碑进度：** M0–M3 已完成 preview；M4 已完成 `/setrepo`、显式启用文件快照、自动调度、恢复导出、面板闭环与首轮安全加固，现处于构建/运行时验收阶段。
+**里程碑进度：** M0–M3 已完成 preview；M4 已完成 `/setrepo`、显式启用文件快照、自动调度、恢复导出、双版本文件审阅与并发/取消边界加固，并已在 DSH `0.1.0-rc.7` 完成自动化及真实浏览器验收。
 
 **首要设计决策：** 逻辑知识仓库与物理文件备份使用两个独立追加日志；逻辑回滚生成新 commit，文件恢复只导出新副本。文件内容只有在人类从面板或 `/setrepo` 明确选根、确认未加密风险并启用后才会扫描。
 
 ---
 
-## 0.0 0.6.0 / M4 文件备份实施记录（2026-08-18）
+## 0.0 0.6.1 / M4 文件备份与审阅实施记录（2026-08-18）
 
 ### 本轮交付
 
@@ -41,20 +41,24 @@
 - 所有 `repo_*` 工具统一使用共享 resolver：优先采用人类明确选择并经 `workspaceRegistry.resolveByPath()` 重新校验的仓库，否则回退到调用会话 `cwd`。
 - `/setrepo` 只选择目标，不授予成员资格；Issue/评论类 agent 工具无条件校验 `workspace.sessionIds`，非成员不能借选择事件写入成员作者身份。
 - 中文 `shell.overlay` 看板新增“文件备份”页签；仓库下拉选择会为当前在线会话显式激活仓库。面板可完成选根、风险确认、间隔配置、启停、立即快照、历史/文件分页、文本预览和恢复导出。
+- “提交历史”升级为 GitHub Files changed 风格的物理文件版本审阅：默认比较最新与前一份有效快照（首份对 `ROOT`），可选择 base/head，只列新增/修改/删除文件，提供筛选、分页、统一文本 diff、二进制提示和大文件提示；逻辑 key/value commit 历史仍保留在折叠区。
 - 管理 API 仍以稳定 `workspaceId/sessionId` 定位，面板启用备份时提交服务端签发的 opaque root ID，不提交绝对工作区路径或任意源路径。
-- 新增独立 `.dsh-repo/backup/`：校验和 journal、SHA-256 对象库、私有 staging 和只新增的 exports。配置、manifest、snapshot 与原始文件 blob 均内容寻址，未变化扫描不追加重复快照。
+- 新增独立 `.dsh-repo/backup/`：校验和 journal、SHA-256 对象库、私有 staging 和只新增的 exports。配置、manifest、snapshot 与原始文件 blob 均内容寻址；每个版本在逻辑上是完整清单，物理上复用未变化 blob。比较路径、mode、size 与 blob 后的语义无变化扫描（包括仅 mtime 变化）不写 manifest、不追加快照，也不扩张对象库。
 - 调度器启动时只用轻量 backup marker 建立已配置索引；之后仅已启用仓库进入 60 秒协调，不对未启用仓库读取文件内容。
 - 首版取消“整个工作区一键扫描”，只允许 1–16 个明确根；固定排除仓库元数据、生成目录及常见凭据/密钥位置。备份未加密、不上传，必须由人类确认风险。
 - 扫描采用排序遍历、realpath containment、symlink/junction/special-file 拒绝、打开文件身份校验及第二轮观察；这是协作式本地文件系统上的逐文件尽力一致性，不宣称 VSS/全局原子性或抵抗恶意竞态。
 - 恢复 v1 只导出到 `.dsh-repo/backup/exports/export_<uuid>`，不覆盖源文件。导出一旦对用户可见，即使尾随审计验证失败也不会删除恢复字节。
 - 加入独立 capture lock、2 GiB 对象库预算（保守预留一个最大快照）、64 MiB 单文件、512 MiB/10,000 文件单快照、100 快照、深度 32 等 fail-closed 限制；不自动 prune，不猜删陈旧锁。
+- 对象写入在实际写 bytes 前再次检查取消；若 `O_EXCL` 已创建但对象未完成，则仅在文件身份仍匹配时清理，完整写入并 fsync 后则跨过不可逆边界并完成目录持久化。export 在 rename 前响应取消，rename 后忽略调用方取消并完成审计；不把已发布恢复副本误报为普通 AbortError。
+- scheduler 统一持有手动/自动 capture 的 `AbortController`，dispose 会停止 timer、取消并等待 reconcile 与全部在途 capture；重复 capture 明确返回 `BACKUP_BUSY`。
 
 ### 当前验证
 
 - `npm run typecheck`：通过。
-- repository/M4 自动化套件 **37/37 通过**，覆盖逻辑仓库回归、管理 API、面板后端 token/嵌套目录选择、`/setrepo`、文件/二进制快照、去重、排除、junction、锁、对象损坏、导出和 scheduler 初始自动快照。
-- `dev_build_plugin` 与确定性热重载通过；运行时确认 `setrepo` command 已注册。专用临时注册工作区完成 enable → capture → preview → export → disable 全链路，随后注销并删除，无残留且未触碰当前工作区。
-- 真实浏览器验证“文件备份”页签存在；仓库选择器已由 Windows 原生 `<select>` 改为主题化 listbox，暗色 hover 无白底闪烁，菜单关闭/工作区激活行为正常。
+- repository/M4 自动化套件 **46/46 通过**，覆盖逻辑仓库回归、管理 API、面板后端 token/嵌套目录选择、`/setrepo`、A/M/D 比较与分页、文本/二进制/大文件 diff、末行无换行、mtime-only no-op、对象未完成取消清理、capture 并发、非法 journal、export rename/取消边界和 scheduler dispose。
+- `dev_build_plugin` 与确定性热重载通过；运行时确认 `@deepseek-ai/dsh@0.1.0-rc.7` 下插件 active、`setrepo` command 已注册。
+- 专用临时注册工作区真实生成两代快照：默认相邻比较准确显示 `+1 / ~3 / −1` 共 5 个变化文件；桌面端验证文本 unified diff、删除文件、二进制/70 KiB 大文件状态、筛选和自定义版本菜单，430 px 窄屏为单列且页面无横向溢出。
+- 相同内容再次扫描返回 `created: false`，journal bytes 与对象文件集合均不变；未触碰当前开发仓库的备份配置或源文件。
 - Windows 目录 `fsync` 已与既有 initializer 一致处理为文件已同步、目录同步 POSIX-only；WSL localhost/NAT 乱码仍为外部无害诊断。
 
 ### 明确不做

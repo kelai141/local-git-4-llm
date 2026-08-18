@@ -154,6 +154,35 @@ async function routeAdminRequest(
     return
   }
 
+  if (req.method === 'GET' && suffix === '/backup/compare') {
+    const workspace = requireWorkspace(ctx, url.searchParams.get('workspaceId'))
+    const base = url.searchParams.get('base') ?? 'ROOT'
+    const head = url.searchParams.get('head') ?? 'LATEST'
+    const limitValue = Number(url.searchParams.get('limit') ?? 250)
+    const cursor = url.searchParams.get('cursor') ?? undefined
+    const comparison = await FileBackupRepository.compare(
+      workspace.path,
+      String(workspace.id),
+      base,
+      head,
+      limitValue,
+      cursor,
+    )
+    sendJson(res, 200, { ok: true, data: comparison })
+    return
+  }
+
+  if (req.method === 'GET' && suffix === '/backup/diff') {
+    const workspace = requireWorkspace(ctx, url.searchParams.get('workspaceId'))
+    const base = url.searchParams.get('base') ?? 'ROOT'
+    const head = url.searchParams.get('head') ?? 'LATEST'
+    const path = url.searchParams.get('path')
+    if (path === null) throw new AdminApiError(400, 'INVALID_REQUEST', '文件差异路径缺失。')
+    const diff = await FileBackupRepository.fileDiff(workspace.path, String(workspace.id), base, head, path)
+    sendJson(res, 200, { ok: true, data: diff })
+    return
+  }
+
   if (req.method === 'GET' && suffix === '/backup/snapshot') {
     const workspace = requireWorkspace(ctx, url.searchParams.get('workspaceId'))
     const selector = url.searchParams.get('snapshot') ?? 'LATEST'
